@@ -107,3 +107,43 @@ fn load_or_default<T: Default + for<'de> Deserialize<'de>>(path: &Path) -> Resul
     let text = fs::read_to_string(path).map_err(|e| format!("{} を読めません: {e}", path.display()))?;
     serde_json::from_str(&text).map_err(|e| format!("{} の形式が不正です: {e}", path.display()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 受け入れ条件 9(再起動しても設定が保持される)の中核: 保存 → 読み戻しの round-trip。
+    #[test]
+    fn agents_config_roundtrip() {
+        let dir = std::env::temp_dir().join("agent_deck_test_config");
+        fs::create_dir_all(&dir).unwrap();
+        let mut cfg = AgentsConfig { version: 1, agents: BTreeMap::new() };
+        cfg.agents.insert(
+            "survey-analyst".into(),
+            AgentSettings {
+                input_dir: Some(PathBuf::from("C:/work/in")),
+                output_dir: Some(PathBuf::from("C:/work/out")),
+                allowed_tools: vec!["write".into(), "shell(python:*)".into()],
+                denied_tools: vec!["shell(rm)".into()],
+                auto_approve_write_in_output_dir: true,
+            },
+        );
+        save_agents_config(&dir, &cfg).unwrap();
+        let loaded = load_agents_config(&dir).unwrap();
+        let s = &loaded.agents["survey-analyst"];
+        assert_eq!(s.input_dir.as_deref(), Some(Path::new("C:/work/in")));
+        assert_eq!(s.allowed_tools, vec!["write", "shell(python:*)"]);
+        assert!(s.auto_approve_write_in_output_dir);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 壊れた JSON は握りつぶさずエラーになる(docs/development.md §3)。
+    #[test]
+    fn broken_json_is_an_error() {
+        let dir = std::env::temp_dir().join("agent_deck_test_config_broken");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("agents.json"), "{ こわれてる").unwrap();
+        assert!(load_agents_config(&dir).is_err());
+        fs::remove_dir_all(&dir).ok();
+    }
+}

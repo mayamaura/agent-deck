@@ -4,6 +4,8 @@ name = "agent-deck"
 version = "0.1.0"
 description = "Copilot エージェントに定型業務を依頼し、稼働状況をリアルタイム表示するデスクトップアプリ"
 edition = "2021"
+# 検証バイナリ(smoke / stepN_check)があるため、tauri dev の cargo run 対象を明示
+default-run = "agent-deck"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

@@ -78,6 +78,25 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin smoke
   タスク終端で history.jsonl に追記。UI は履歴更新・出力フォルダを開く・未完成注記。
   検証: `cargo run --bin step6_check`(完了+中断の 2 ラウンド)
 
+### v0.1 受け入れ条件の照合(2026-08-12)
+
+requirements.md §4 の 10 項目の検証状況:
+
+| # | 条件 | 検証 |
+|---|---|---|
+| 1 | ポータブル exe | リリースビルドで確認(単体 exe。WebView2 前提は docs 記載) |
+| 2 | 一覧表示 | GUI 実機確認(スクリーンショット。未設定バッジ含む) |
+| 3 | 選択して実行 | step3_check + GUI 配線確認 |
+| 4 | リアルタイム表示 | step2/5_check + ツリー描画 |
+| 5 | サブエージェント行と所要時間 | step5_check(実機で委任を観測) |
+| 6 | 出力フォルダ内は承認なし | step4_check ラウンド A |
+| 7 | 外は承認ダイアログ、拒否で停止 | step4_check ラウンド B(ファイル未作成まで確認) |
+| 8 | 完了後のファイル一覧とフォルダを開く | step6_check + GUI ボタン |
+| 9 | 設定の永続化 | config round-trip テスト + 設定画面 |
+| 10 | 履歴記録 | step6_check(completed / cancelled の 2 種) |
+
+GUI 上での通し操作(実際の業務データでのレポート生成)はユーザーの実運用確認待ち。
+
 ### 既知の設計上の限界(v0.1)
 
 - モデルが write ツールでなくシェル(Set-Content 等)でファイルを書いた場合、
