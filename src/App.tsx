@@ -18,6 +18,13 @@ import type {
 import { EVENT_CHANNEL } from "./types";
 import { buildTree } from "./tree";
 import type { AgentRow, TreeState } from "./tree";
+import { sessionSummary } from "./sessions";
+
+// 実行ビュー上部のダッシュボード帯・タブに残す「直近の完了/失敗/中断セッション」件数の上限
+// (docs/roadmap.md v0.5: 実行中+直近数件のセッション)。実行中セッションは件数に含めない。
+const MAX_RECENT_FINISHED_SESSIONS = 5;
+
+const NO_RESPONSES = new Set<string>();
 
 // 3 ペイン構成の骨格(docs/requirements.md §3.1)。
 // 実行ビューはツリー表示(docs/requirements.md §3.3。このアプリの主目的)。
@@ -139,6 +146,33 @@ interface LoggedEvent {
   event: AppEvent;
 }
 
+/** セッション 1 本分のイベント束(docs/roadmap.md v0.5: 並行実行)。実行ビューのタブ 1 枚に対応する。
+ * respondedRequestIds はセッションごとに持つ(承認ダイアログはタブに紐づく)。 */
+interface SessionState {
+  agentId: string;
+  events: LoggedEvent[];
+  rowStartedAt: Record<string, number>;
+  respondedRequestIds: Set<string>;
+}
+
+function sessionElapsedMs(rowStartedAt: Record<string, number>, nowTick: number): number | null {
+  const start = rowStartedAt.main;
+  return start != null ? nowTick - start : null;
+}
+
+/** 実行中でないセッションのうち古いものから間引く(タブ・ダッシュボードの肥大化防止)。
+ * 実行中セッションは対象外(件数上限を超えても常に表示する)。 */
+function pruneOldFinishedSessions(sessions: Record<string, SessionState>): Record<string, SessionState> {
+  const finishedIds = Object.keys(sessions).filter(
+    (sid) => sessionSummary(sessions[sid].events.map((e) => e.event)).status !== "running",
+  );
+  const excess = finishedIds.length - MAX_RECENT_FINISHED_SESSIONS;
+  if (excess <= 0) return sessions;
+  const next = { ...sessions };
+  for (const sid of finishedIds.slice(0, excess)) delete next[sid];
+  return next;
+}
+
 const STATUS_LABEL: Record<AgentRow["status"], string> = {
   running: "▶ 実行中",
   completed: "✅ 完了",
@@ -231,10 +265,10 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
 
   const [prompt, setPrompt] = useState("");
-  const [running, setRunning] = useState(false);
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  // セッション別のイベント束(docs/roadmap.md v0.5: 並行実行)。キーは sessionId。
+  const [sessions, setSessions] = useState<Record<string, SessionState>>({});
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
-  const [events, setEvents] = useState<LoggedEvent[]>([]);
 
   // 選択中エージェントの入出力設定(docs/requirements.md §3.4)。
   const [configs, setConfigs] = useState<Record<string, AgentSettings | null>>({});
@@ -269,11 +303,8 @@ export default function App() {
   const [scheduleSaveStatus, setScheduleSaveStatus] = useState<string | null>(null);
   const [queueStatus, setQueueStatus] = useState<QueueStatusDto | null>(null);
 
-  // 応答済みの権限要求 requestId(docs/tree.ts の buildTree 第2引数)。
-  const [respondedRequestIds, setRespondedRequestIds] = useState<Set<string>>(new Set());
   const [outputFolderError, setOutputFolderError] = useState<string | null>(null);
-  // 行ごとの経過時間計算用の開始時刻(受信時刻, epoch ms)。key は tree.ts の AgentRow.key。
-  const [rowStartedAt, setRowStartedAt] = useState<Record<string, number>>({});
+  // 経過時間表示の現在時刻(1秒毎に更新。全セッション共通)。
   const [nowTick, setNowTick] = useState(() => Date.now());
 
   async function reloadAgents() {
@@ -374,32 +405,44 @@ export default function App() {
   }, [selected, configs]);
 
   // タスク実行イベントの購読(docs/architecture.md §4: 単一チャネルを kind で判別)。
-  // 実行ビューはタスクごとに新しくなるため、taskStarted でログ・応答済み集合・
-  // 経過時間の起点をリセットする。
+  // sessionId ごとにセッションを束ねる(docs/roadmap.md v0.5: 並行実行)。taskStarted は
+  // 新しい sessionId で来るため、既存セッションを壊さず新しいタブが増える形になる。
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     listen<AppEvent>(EVENT_CHANNEL, ({ payload: ev }) => {
       const logged: LoggedEvent = { time: new Date().toLocaleTimeString(), event: ev };
-      setEvents((prev) => (ev.kind === "taskStarted" ? [logged] : [...prev, logged]));
+      const sid = ev.sessionId;
+
+      setSessions((prev) => {
+        const base: SessionState = prev[sid] ?? {
+          agentId: "",
+          events: [],
+          rowStartedAt: {},
+          respondedRequestIds: new Set(),
+        };
+        const next: SessionState = { ...base, events: [...base.events, logged] };
+        if (ev.kind === "taskStarted") {
+          next.agentId = ev.agentId;
+          next.rowStartedAt = { main: Date.now() };
+        } else if (ev.kind === "subagentStarted") {
+          next.rowStartedAt = { ...next.rowStartedAt, [ev.agentId]: Date.now() };
+        }
+        return { ...prev, [sid]: next };
+      });
 
       if (ev.kind === "taskStarted") {
-        setRunning(true);
-        setSessionId(ev.sessionId);
-        setRespondedRequestIds(new Set());
-        setRowStartedAt({ main: Date.now() });
+        setActiveSessionId(sid);
         setNowTick(Date.now());
         // スケジュール実行がキューから1件消費されたはずなので待機件数を更新する。
         reloadQueueStatus();
-      } else if (ev.kind === "subagentStarted") {
-        setRowStartedAt((prev) => ({ ...prev, [ev.agentId]: Date.now() }));
       } else if (ev.kind === "taskCompleted" || ev.kind === "taskFailed" || ev.kind === "taskCancelled") {
-        setRunning(false);
         // 履歴ペインをこのタスクの結果で更新する(docs/requirements.md 受け入れ条件10)。
         invoke<HistoryEntry[]>("list_history", { limit: 20 })
           .then(setHistory)
           .catch((e) => setError(String(e)));
         reloadQueueStatus();
         reloadSchedules();
+        setSessions((prev) => pruneOldFinishedSessions(prev));
       }
     }).then((fn) => {
       unlisten = fn;
@@ -407,21 +450,39 @@ export default function App() {
     return () => unlisten?.();
   }, []);
 
-  // 経過時間の表示更新(実行中は1秒ごと。running が false になると自動的に止まり、
-  // その時点の nowTick が「確定値」として残る)。
+  // アクティブなタブが間引かれて消えた場合、直近のセッションへフォールバックする。
   useEffect(() => {
-    if (!running) return;
-    const id = setInterval(() => setNowTick(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, [running]);
+    if (activeSessionId && !sessions[activeSessionId]) {
+      const ids = Object.keys(sessions);
+      setActiveSessionId(ids.length > 0 ? ids[ids.length - 1] : null);
+    }
+  }, [sessions, activeSessionId]);
 
-  const tree: TreeState = buildTree(
-    events.map((e) => e.event),
-    respondedRequestIds,
+  const anyRunning = Object.values(sessions).some(
+    (s) => sessionSummary(s.events.map((e) => e.event)).status === "running",
   );
 
+  // 経過時間の表示更新(いずれかのセッションが実行中の間は1秒ごと)。
+  useEffect(() => {
+    if (!anyRunning) return;
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [anyRunning]);
+
+  const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
+  const tree: TreeState = buildTree(
+    activeSession ? activeSession.events.map((e) => e.event) : [],
+    activeSession ? activeSession.respondedRequestIds : NO_RESPONSES,
+  );
+  const runningSessionIds = Object.keys(sessions).filter(
+    (sid) => sessionSummary(sessions[sid].events.map((e) => e.event)).status === "running",
+  );
+  const latestFailure = history.find((h) => h.status === "failed") ?? null;
+
   async function handleRun() {
-    if (!selected || !prompt.trim() || running) return;
+    // docs/roadmap.md v0.5: 実行中でも他エージェントの実行ボタンは有効(並行実行)。
+    // 同一エージェントの二重実行は outputDir 制限があればバックエンドがエラーを返す。
+    if (!selected || !prompt.trim()) return;
     setRunError(null);
     try {
       await invoke("start_task", { agentId: selected, prompt });
@@ -430,10 +491,11 @@ export default function App() {
     }
   }
 
+  /** 選択中タブ(activeSessionId)のセッションを中断する。 */
   async function handleCancel() {
-    if (!sessionId) return;
+    if (!activeSessionId) return;
     try {
-      await invoke("cancel_task", { sessionId });
+      await invoke("cancel_task", { sessionId: activeSessionId });
     } catch (e) {
       setRunError(String(e));
     }
@@ -669,10 +731,17 @@ export default function App() {
     }
   }
 
+  /** 選択中タブ(activeSessionId)の respondedRequestIds に requestId を積む。 */
   async function respondPermission(requestId: string, decision: boolean) {
+    if (!activeSessionId) return;
     try {
       await invoke("respond_permission", { requestId, decision });
-      setRespondedRequestIds((prev) => new Set(prev).add(requestId));
+      setSessions((prev) => {
+        const s = prev[activeSessionId];
+        if (!s) return prev;
+        const responded = new Set(s.respondedRequestIds).add(requestId);
+        return { ...prev, [activeSessionId]: { ...s, respondedRequestIds: responded } };
+      });
     } catch (e) {
       setRunError(String(e));
     }
@@ -1074,7 +1143,38 @@ export default function App() {
       </aside>
       <main className="pane run">
         <h2>実行ビュー</h2>
-        <p className="muted">待機中のスケジュール実行: {queueStatus?.queued ?? 0} 件</p>
+        {/* ダッシュボード帯(docs/roadmap.md v0.5): 実行中セッションのチップ・待機キュー・直近の失敗。 */}
+        <div className="dashboard-bar">
+          <div className="dashboard-chips">
+            {runningSessionIds.length === 0 && <span className="muted">実行中のセッションはありません</span>}
+            {runningSessionIds.map((sid) => {
+              const s = sessions[sid];
+              const t = buildTree(s.events.map((e) => e.event), s.respondedRequestIds);
+              const pending =
+                (t.main?.pendingPermissions.length ?? 0) +
+                t.subagents.reduce((n, r) => n + r.pendingPermissions.length, 0);
+              const elapsed = sessionElapsedMs(s.rowStartedAt, nowTick);
+              return (
+                <button
+                  key={sid}
+                  type="button"
+                  className={sid === activeSessionId ? "dashboard-chip active" : "dashboard-chip"}
+                  onClick={() => setActiveSessionId(sid)}
+                >
+                  <strong>{s.agentId}</strong>
+                  <span className="muted">{elapsed != null ? formatDuration(elapsed) : "—"}</span>
+                  {pending > 0 && <span className="badge">⚠ 承認待ち {pending}</span>}
+                </button>
+              );
+            })}
+          </div>
+          <span className="muted">待機中のスケジュール実行: {queueStatus?.queued ?? 0} 件</span>
+          {latestFailure && (
+            <span className="dashboard-failure">
+              ⚠ 直近の失敗: {latestFailure.agentId}({latestFailure.startedAt})
+            </span>
+          )}
+        </div>
         {selected ? (
           <>
             <p className="muted">{agents.find((a) => a.id === selected)?.description}</p>
@@ -1084,20 +1184,48 @@ export default function App() {
               onChange={(e) => setPrompt(e.target.value)}
               placeholder="依頼内容を入力してください"
               rows={3}
-              disabled={running}
             />
             <div className="run-controls">
-              <button onClick={handleRun} disabled={running || !prompt.trim()}>
+              <button onClick={handleRun} disabled={!prompt.trim()}>
                 実行
               </button>
-              {running && <button onClick={handleCancel}>中断</button>}
             </div>
             {runError && <p className="error">⚠ {runError}</p>}
+          </>
+        ) : (
+          <p className="muted">左の一覧からエージェントを選択してください</p>
+        )}
+        {/* セッションタブ(docs/roadmap.md v0.5: 実行中+直近数件のセッション)。各タブは既存の
+            buildTree でツリーを描画する(呼び出し側でセッション分割してから渡すだけ)。 */}
+        {Object.keys(sessions).length > 0 && (
+          <div className="session-tabs">
+            {Object.keys(sessions).map((sid) => {
+              const summary = sessionSummary(sessions[sid].events.map((e) => e.event));
+              return (
+                <button
+                  key={sid}
+                  type="button"
+                  className={sid === activeSessionId ? "session-tab active" : "session-tab"}
+                  onClick={() => setActiveSessionId(sid)}
+                >
+                  {summary.agentId} {STATUS_LABEL[summary.status]}
+                </button>
+              );
+            })}
+          </div>
+        )}
+        {activeSession ? (
+          <>
+            {tree.taskStatus === "running" && (
+              <div className="run-controls">
+                <button onClick={handleCancel}>中断</button>
+              </div>
+            )}
             {tree.main && (
               <div className="agent-tree">
                 <AgentRowView
                   row={tree.main}
-                  elapsedMs={elapsedMsFor(tree.main, rowStartedAt, nowTick)}
+                  elapsedMs={elapsedMsFor(tree.main, activeSession.rowStartedAt, nowTick)}
                   isSub={false}
                   onRespond={respondPermission}
                 />
@@ -1105,7 +1233,7 @@ export default function App() {
                   <div className="sub-indent" key={sub.key}>
                     <AgentRowView
                       row={sub}
-                      elapsedMs={elapsedMsFor(sub, rowStartedAt, nowTick)}
+                      elapsedMs={elapsedMsFor(sub, activeSession.rowStartedAt, nowTick)}
                       isSub
                       onRespond={respondPermission}
                     />
@@ -1121,7 +1249,7 @@ export default function App() {
             )}
           </>
         ) : (
-          <p className="muted">左の一覧からエージェントを選択してください</p>
+          <p className="muted">実行中・直近のセッションはまだありません</p>
         )}
       </main>
       <aside className="pane detail">
@@ -1150,9 +1278,9 @@ export default function App() {
           </div>
         )}
         {outputFolderError && <p className="error">⚠ {outputFolderError}</p>}
-        <h3>ログ</h3>
+        <h3>ログ({activeSession ? sessionSummary(activeSession.events.map((e) => e.event)).agentId : "—"})</h3>
         <ul className="event-log">
-          {events.map((e, i) => (
+          {(activeSession?.events ?? []).map((e, i) => (
             <li key={i} className={e.event.kind === "taskFailed" ? "error" : undefined}>
               <span className="muted">{e.time}</span> [{e.event.kind}] {summarize(e.event)}
             </li>

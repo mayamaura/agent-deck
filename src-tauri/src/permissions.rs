@@ -90,7 +90,9 @@ pub fn is_within(base: &Path, target: &Path) -> bool {
 
 /// 存在しない可能性のあるパスを正規化する。
 /// 存在する最深の祖先を canonicalize し、残り成分を検査しながら連結する。
-fn normalize_possibly_missing(path: &Path) -> Option<PathBuf> {
+/// pub(crate): main.rs の output_dir_conflict(docs/roadmap.md v0.5、同一 outputDir 検出)が
+/// 「配下判定」ではなく「同一パス判定」に同じ正規化ロジックを再利用する。
+pub(crate) fn normalize_possibly_missing(path: &Path) -> Option<PathBuf> {
     if let Ok(p) = path.canonicalize() {
         return Some(p);
     }

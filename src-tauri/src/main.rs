@@ -12,21 +12,23 @@ mod sync;
 mod update;
 
 use config::{AgentSettings, AppConfig};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{Emitter, Manager, State};
 
-/// v0.1 の同時実行数上限。1 本固定だが、上限をこの定数に集約しておくことで
-/// 将来の並行実行(roadmap.md v0.5)対応時にここだけ変更すれば済むようにする
-/// (docs/open-questions.md #4 / roadmap.md「セッション同時1本をデータ構造に焼き込まない」)。
-const MAX_CONCURRENT_TASKS: usize = 1;
-
-/// 実行中タスクの管理情報。session_id は TaskStarted イベント受信時に埋まる
-/// (start_task 呼び出し時点ではまだセッションが存在しないため)。
+/// 実行中タスク 1 本分の管理情報(docs/roadmap.md v0.5: 並行実行)。
+/// キーは AppState.running の run_id(起動時に採番。SDK のセッション作成前は
+/// session_id が定まらないため、こちらを HashMap のキーにする)。
+/// session_id は TaskStarted イベント受信時に埋まる。
 struct RunningTask {
+    run_id: String,
     session_id: String,
+    agent_id: String,
+    /// 同一 outputDir を使うタスクの同時実行を防ぐための判定に使う(docs/roadmap.md v0.5)。
+    output_dir: Option<PathBuf>,
     cancel: tokio::sync::oneshot::Sender<()>,
 }
 
@@ -41,8 +43,10 @@ struct QueuedRun {
 /// 各コマンドがフロントへ理由を返す(docs/architecture.md §6.1: 起動時にエラーを出す)。
 struct AppState {
     data_dir: Result<PathBuf, String>,
-    // MAX_CONCURRENT_TASKS == 1 の間は Option で足りる。
-    running: Mutex<Option<RunningTask>>,
+    /// 実行中タスクの集合(docs/roadmap.md v0.5: 並行実行)。キーは run_id。
+    running: Mutex<HashMap<String, RunningTask>>,
+    /// run_id 採番用のカウンタ。
+    next_run_id: AtomicU64,
     /// respond_permission コマンドと copilot::run_task の PermissionHandler を橋渡しする
     /// (docs/architecture.md §7.1)。
     bridge: std::sync::Arc<copilot::PermissionBridge>,
@@ -76,6 +80,22 @@ fn validate_agent_id(agent_id: &str) -> Result<(), String> {
         return Err(format!("不正なエージェント ID です: {agent_id}"));
     }
     Ok(())
+}
+
+/// 同じ outputDir を使う実行中タスクがあれば、拒否理由の文言を返す(docs/roadmap.md v0.5:
+/// 成果物の混線防止)。outputDir 未設定同士(どちらも None)は対象外(制限しない)。
+/// パス比較は正規化済み絶対パスで行う(docs/development.md §3、permissions::normalize_possibly_missing
+/// を再利用)。純関数に切り出してユニットテストで担保する(spawn_task から呼ぶ)。
+fn output_dir_conflict(running: &[(String, Option<PathBuf>)], candidate: &Option<PathBuf>) -> Option<String> {
+    let candidate_dir = candidate.as_ref()?;
+    let candidate_norm = permissions::normalize_possibly_missing(candidate_dir)?;
+    for (agent_id, dir) in running {
+        let Some(dir) = dir else { continue };
+        if permissions::normalize_possibly_missing(dir).as_deref() == Some(candidate_norm.as_path()) {
+            return Some(format!("同じ出力フォルダを使うタスクが実行中です({agent_id})"));
+        }
+    }
+    None
 }
 
 /// frontmatter + 本文の .agent.md テキストを組み立てる(save/create_agent_definition 共通)。
@@ -384,13 +404,6 @@ fn spawn_task(
     unattended: bool,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
-    {
-        let running = state.running.lock().unwrap();
-        let running_count = if running.is_some() { 1 } else { 0 };
-        if running_count >= MAX_CONCURRENT_TASKS {
-            return Err("タスクが実行中です".into());
-        }
-    }
 
     let data_dir = state.data_dir()?.clone();
     let cfg = config::load_app_config(&data_dir)?;
@@ -443,6 +456,8 @@ fn spawn_task(
     // rules は agents.json の該当エージェント設定から構成する。未設定なら既定
     // (allowed/denied 空、output_dir 無し、auto_approve true。docs/architecture.md §7.1)。
     let rules = agents_cfg.agents.get(&agent_id).cloned().unwrap_or_default();
+    // 実行中タスクと同じ outputDir なら起動を拒否する(docs/roadmap.md v0.5: 成果物の混線防止)。
+    let output_dir = rules.output_dir.clone();
 
     // 履歴書き込み用に、TaskSpec へ move する前に複製しておく(docs/development.md ステップ6)。
     let prompt_for_history = prompt.clone();
@@ -459,28 +474,42 @@ fn spawn_task(
     };
 
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
-    {
-        // 冒頭のチェックとこの set の間に別の start_task が割り込む可能性があるため、
-        // 同一ロック内で再チェックしてから登録する(TOCTOU 防止)。
+    let run_id = {
+        // 実行数上限・同一 outputDir 排他の判定から登録までを同一ロック内で行う(TOCTOU 防止)。
         let mut running = state.running.lock().unwrap();
-        if running.is_some() {
-            return Err("タスクが実行中です".into());
+        if running.len() >= cfg.max_concurrent_tasks {
+            return Err(format!("同時実行数の上限({})に達しています", cfg.max_concurrent_tasks));
         }
-        *running = Some(RunningTask {
-            session_id: String::new(),
-            cancel: cancel_tx,
-        });
-    }
+        let running_list: Vec<(String, Option<PathBuf>)> =
+            running.values().map(|t| (t.agent_id.clone(), t.output_dir.clone())).collect();
+        if let Some(reason) = output_dir_conflict(&running_list, &output_dir) {
+            return Err(reason);
+        }
+        let run_id = format!("run-{}", state.next_run_id.fetch_add(1, Ordering::Relaxed));
+        running.insert(
+            run_id.clone(),
+            RunningTask {
+                run_id: run_id.clone(),
+                session_id: String::new(),
+                agent_id: agent_id.clone(),
+                output_dir,
+                cancel: cancel_tx,
+            },
+        );
+        run_id
+    };
 
     let app_handle = app.clone();
+    let run_id_for_task = run_id.clone();
     tauri::async_runtime::spawn(async move {
         let sink_handle = app_handle.clone();
+        let run_id_for_sink = run_id_for_task.clone();
         let sink = move |ev: events::AppEvent| {
             // TaskStarted でセッション ID が判明した時点で RunningTask に反映する
             // (cancel_task が session_id を突き合わせられるようにするため)。
             if let events::AppEvent::TaskStarted { session_id, .. } = &ev {
                 if let Some(state) = sink_handle.try_state::<AppState>() {
-                    if let Some(running) = state.running.lock().unwrap().as_mut() {
+                    if let Some(running) = state.running.lock().unwrap().get_mut(&run_id_for_sink) {
                         running.session_id = session_id.clone();
                     }
                 }
@@ -512,7 +541,7 @@ fn spawn_task(
         }
 
         if let Some(state) = app_handle.try_state::<AppState>() {
-            *state.running.lock().unwrap() = None;
+            state.running.lock().unwrap().remove(&run_id_for_task);
         }
     });
 
@@ -552,6 +581,7 @@ async fn scheduler_loop(app: tauri::AppHandle) {
 fn scheduler_tick(app: &tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let data_dir = state.data_dir()?.clone();
+    let cfg = config::load_app_config(&data_dir)?;
 
     let mut file = schedule::load(&data_dir)?;
     let now = chrono::Local::now();
@@ -571,7 +601,9 @@ fn scheduler_tick(app: &tauri::AppHandle) -> Result<(), String> {
         state.queue.lock().unwrap().extend(due_runs);
     }
 
-    let should_try = state.running.lock().unwrap().is_none() && !state.queue.lock().unwrap().is_empty();
+    // v0.5: 「実行中でなければ」ではなく「実行数 < 上限」でキューを消化する(docs/roadmap.md v0.5)。
+    let should_try =
+        state.running.lock().unwrap().len() < cfg.max_concurrent_tasks && !state.queue.lock().unwrap().is_empty();
     if should_try {
         let run = state.queue.lock().unwrap().pop_front();
         if let Some(run) = run {
@@ -631,21 +663,16 @@ fn get_queue_status(state: State<AppState>) -> QueueStatusDto {
 #[tauri::command]
 fn cancel_task(state: State<AppState>, session_id: String) -> Result<(), String> {
     let mut running = state.running.lock().unwrap();
-    match running.take() {
-        Some(task) if task.session_id == session_id => {
+    let run_id = running.values().find(|t| t.session_id == session_id).map(|t| t.run_id.clone());
+    match run_id {
+        Some(run_id) => {
+            let task = running.remove(&run_id).expect("run_id はこの直前の検索で確認済み");
             // 受信側(run_task)が既に終了していれば送信は失敗するが、握りつぶしてよい
             // (二重中断や完了直後の中断は正常なタイミング差であり、エラーではない)。
             let _ = task.cancel.send(());
             Ok(())
         }
-        Some(other) => {
-            let running_id = other.session_id.clone();
-            *running = Some(other);
-            Err(format!(
-                "指定されたセッション({session_id})は実行中ではありません(実行中: {running_id})"
-            ))
-        }
-        None => Err("実行中のタスクはありません".into()),
+        None => Err(format!("指定されたセッション({session_id})は実行中ではありません")),
     }
 }
 
@@ -662,7 +689,8 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .manage(AppState {
             data_dir: config::data_dir(),
-            running: Mutex::new(None),
+            running: Mutex::new(HashMap::new()),
+            next_run_id: AtomicU64::new(1),
             bridge: copilot::PermissionBridge::new(),
             queue: Mutex::new(VecDeque::new()),
         })
@@ -745,6 +773,41 @@ mod tests {
         assert!(validate_agent_id("a/b").is_err());
         assert!(validate_agent_id("a\\b").is_err());
         assert!(validate_agent_id("").is_err());
+    }
+
+    /// docs/roadmap.md v0.5: 同じ outputDir を使うタスクは同時実行できない。
+    #[test]
+    fn output_dir_conflict_detects_same_normalized_path() {
+        let dir = std::env::temp_dir().join("agent_deck_test_main_outputdir_conflict");
+        std::fs::create_dir_all(&dir).unwrap();
+        let running = vec![("agent-a".to_string(), Some(dir.clone()))];
+        // 素朴な文字列表現は違う("./" 混入)が、正規化すれば同一パス。
+        let candidate = Some(dir.parent().unwrap().join(".").join(dir.file_name().unwrap()));
+        let reason = output_dir_conflict(&running, &candidate);
+        assert_eq!(reason, Some("同じ出力フォルダを使うタスクが実行中です(agent-a)".to_string()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn output_dir_conflict_none_when_dirs_differ() {
+        let base = std::env::temp_dir().join("agent_deck_test_main_outputdir_no_conflict");
+        let a = base.join("a");
+        let b = base.join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let running = vec![("agent-a".to_string(), Some(a))];
+        assert_eq!(output_dir_conflict(&running, &Some(b)), None);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// outputDir 未設定同士(どちらも None)は制限しない。
+    #[test]
+    fn output_dir_conflict_none_when_candidate_unset() {
+        let dir = std::env::temp_dir().join("agent_deck_test_main_outputdir_unset");
+        std::fs::create_dir_all(&dir).unwrap();
+        let running = vec![("agent-a".to_string(), None), ("agent-b".to_string(), Some(dir.clone()))];
+        assert_eq!(output_dir_conflict(&running, &None), None);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

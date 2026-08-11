@@ -21,6 +21,15 @@ pub struct AppConfig {
     /// 読めるよう serde default(欠落時は None)。
     #[serde(default)]
     pub update_source: Option<PathBuf>,
+    /// 同時実行数の上限(docs/roadmap.md v0.5、docs/open-questions.md #4: 暫定、既定 2)。
+    /// 正式な上限値は運用を見て決定するため、決め打ちの定数ではなく設定値にしてある。
+    /// 既存 config.json に無くても読めるよう serde default。
+    #[serde(default = "default_max_concurrent_tasks")]
+    pub max_concurrent_tasks: usize,
+}
+
+fn default_max_concurrent_tasks() -> usize {
+    2
 }
 
 impl Default for AppConfig {
@@ -33,6 +42,7 @@ impl Default for AppConfig {
             log_level: "info".into(),
             shared_agents_source: None,
             update_source: None,
+            max_concurrent_tasks: default_max_concurrent_tasks(),
         }
     }
 }
