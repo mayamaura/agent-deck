@@ -378,6 +378,38 @@ fn find_on_path() -> Option<PathBuf> {
     (!first_line.is_empty()).then(|| PathBuf::from(first_line))
 }
 
+/// SDK / CLI 由来のエラー文字列に、利用者向けの対処ヒントを付け足す(docs/roadmap.md v1.0 条件3:
+/// 主要な失敗モードを利用者がエラーメッセージだけで対処できるようにする)。
+/// 元のエラー文言は必ず残す(切り捨てない)。該当パターンが無ければ原文のまま返す。
+/// パターンは大文字小文字を無視した部分一致(先に一致した1件のみ適用)。
+fn with_hint(error: &str) -> String {
+    let lower = error.to_lowercase();
+    let hint = if lower.contains("not authorized") || lower.contains("organization policy") || lower.contains("enterprise")
+    {
+        Some("組織の Copilot CLI ポリシーが有効か管理者に確認してください")
+    } else if lower.contains("not logged in")
+        || lower.contains("login")
+        || lower.contains("authentication")
+        || lower.contains("credentials")
+        || lower.contains("401")
+    {
+        Some("ターミナルで copilot login を実行して認証してください")
+    } else if lower.contains("quota") || lower.contains("credit") || lower.contains("rate limit") || lower.contains("429")
+    {
+        Some("Copilot の利用枠(クレジット)を確認してください。時間をおいて再実行すると回復することがあります")
+    } else if lower.contains("enoent") || lower.contains("no such file") || error.contains("見つかりません") {
+        Some("設定の copilotCliPath、または環境変数 COPILOT_CLI_PATH を確認してください")
+    } else if lower.contains("timeout") || lower.contains("timed out") {
+        Some("時間をおいて再実行してください。長時間かかる依頼はプロンプトを分割すると安定します")
+    } else {
+        None
+    };
+    match hint {
+        Some(h) => format!("{error}\n対処: {h}"),
+        None => error.to_string(),
+    }
+}
+
 /// SDK イベント → AppEvent 変換の内部状態(対応表は docs/architecture.md §4)。
 /// SDK の型はこの構造体の外に出さない。
 pub struct EventContext {
@@ -652,7 +684,7 @@ impl EventContext {
             .unwrap_or_else(|| "不明なエラーが発生しました".to_string());
         vec![AppEvent::TaskFailed {
             session_id: self.session_id.clone(),
-            error,
+            error: with_hint(&error),
         }]
     }
 }
@@ -757,7 +789,7 @@ pub async fn run_task(
 ) -> Result<RunOutcome, String> {
     let client = Client::start(ClientOptions::new().with_program(CliProgram::Path(cli_path)))
         .await
-        .map_err(|e| format!("Copilot CLI を起動できません: {e}"))?;
+        .map_err(|e| with_hint(&format!("Copilot CLI を起動できません: {e}")))?;
 
     // sink を Arc<dyn Fn> にしておき、PermissionHandler(別スレッド/タスクで呼ばれる)にも
     // 同じ関数を共有させる。
@@ -811,7 +843,7 @@ pub async fn run_task(
                 eprintln!("Client の停止に失敗しました: {stop_err}");
             }
             bridge.clear();
-            return Err(format!("セッションを作成できません: {e}"));
+            return Err(with_hint(&format!("セッションを作成できません: {e}")));
         }
     };
 
@@ -883,7 +915,7 @@ pub async fn run_task(
                 }
                 break match send_result {
                     Ok(_) => Outcome::Completed,
-                    Err(e) => Outcome::Failed(format!("タスクの実行に失敗しました: {e}")),
+                    Err(e) => Outcome::Failed(with_hint(&format!("タスクの実行に失敗しました: {e}"))),
                 };
             }
             event = events.recv() => {
@@ -1176,5 +1208,59 @@ mod tests {
         let missing = std::env::temp_dir().join("agent-deck-does-not-exist.exe");
         let err = resolve_cli_path(Some(&missing)).unwrap_err();
         assert!(err.contains("copilotCliPath"));
+    }
+
+    #[test]
+    fn with_hint_adds_policy_advice_for_organization_policy_error() {
+        let original = "You are not authorized to use this Copilot feature, it requires an enterprise or organization policy to be enabled.";
+        let hinted = with_hint(original);
+        assert!(hinted.contains(original), "original text must be preserved");
+        assert!(hinted.contains("組織の Copilot CLI ポリシー"));
+    }
+
+    #[test]
+    fn with_hint_adds_login_advice_for_authentication_error() {
+        let original = "401 Unauthorized: authentication failed";
+        let hinted = with_hint(original);
+        assert!(hinted.contains(original));
+        assert!(hinted.contains("copilot login"));
+    }
+
+    #[test]
+    fn with_hint_adds_quota_advice_for_rate_limit_error() {
+        let original = "429 Too Many Requests: rate limit exceeded";
+        let hinted = with_hint(original);
+        assert!(hinted.contains(original));
+        assert!(hinted.contains("利用枠"));
+    }
+
+    #[test]
+    fn with_hint_adds_cli_path_advice_for_missing_file_error() {
+        let original = "spawn copilot ENOENT";
+        let hinted = with_hint(original);
+        assert!(hinted.contains(original));
+        assert!(hinted.contains("copilotCliPath"));
+    }
+
+    #[test]
+    fn with_hint_adds_cli_path_advice_for_japanese_not_found_error() {
+        let original = "設定された copilotCliPath が見つかりません: C:\\missing\\copilot.exe";
+        let hinted = with_hint(original);
+        assert!(hinted.contains(original));
+        assert!(hinted.contains("COPILOT_CLI_PATH"));
+    }
+
+    #[test]
+    fn with_hint_adds_retry_advice_for_timeout_error() {
+        let original = "operation timed out after 1800s";
+        let hinted = with_hint(original);
+        assert!(hinted.contains(original));
+        assert!(hinted.contains("プロンプトを分割"));
+    }
+
+    #[test]
+    fn with_hint_leaves_unmatched_error_unchanged() {
+        let original = "何か予期しないエラーが発生しました";
+        assert_eq!(with_hint(original), original);
     }
 }

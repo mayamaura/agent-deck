@@ -471,6 +471,12 @@ fn spawn_task(
         .into_iter()
         .filter(|d| !d.shadowed)
         .collect();
+    if definitions.is_empty() {
+        return Err(
+            "エージェント定義がありません。agents フォルダに .agent.md を置くか、設定の共有元フォルダから同期してください"
+                .to_string(),
+        );
+    }
     let selected = definitions
         .iter()
         .find(|d| d.id == agent_id)

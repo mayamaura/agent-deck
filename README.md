@@ -4,7 +4,8 @@
 稼働状況をリアルタイムに把握して成果物を受け取る Windows デスクトップアプリ。
 
 Tauri v2 + Rust / React + TypeScript。Copilot 連携は公式 `github-copilot-sdk`。
-現在 v0.1 を開発中(ステップ1: SDK 疎通確認まで完了)。
+ロードマップ v0.1〜v0.6 の機能実装が完了(タグ v0.1.0〜v0.6.0)。
+v1.0 の正式宣言はチームでの運用確認待ち([docs/development.md](docs/development.md) 参照)。
 
 ## セットアップ
 
@@ -20,6 +21,7 @@ npm run tauri dev
 
 | 文書 | 内容 |
 |---|---|
+| [docs/user-guide.md](docs/user-guide.md) | **利用者向け操作ガイド**(非エンジニア向け) |
 | [docs/requirements.md](docs/requirements.md) | 要求仕様: 目的・スコープ・画面・受け入れ条件 |
 | [docs/architecture.md](docs/architecture.md) | 設計: 責務分割・IPC・イベント・データモデル・権限制御・設計原則 |
 | [docs/development.md](docs/development.md) | 開発ガイド: 環境構築・コマンド・実装ステップと進捗 |

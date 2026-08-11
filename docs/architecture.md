@@ -150,7 +150,10 @@ SDK イベント → AppEvent の対応(ステップ2で実装。イベント名
    ├─ shared-agents/            共有スコープの定義(同期先・アプリ内読み取り専用)
    ├─ shared-agents.meta.json   同期マニフェスト(同期元・時刻・sha256)
    ├─ workspace/<agent_id>/     inputDir 未設定エージェントの作業ディレクトリ
-   └─ logs/                     実行ログ(セッション単位)
+   ├─ schedules.json            定期実行の定義(v0.4)
+   ├─ policy.json               管理者ポリシー(任意配布。forcedDeniedTools)
+   └─ logs/                     セッション単位の監査ログ(session-*.jsonl)と
+                                来歴(provenance-*.json)。logRetentionDays で自動削除
 ```
 
 ポータブル運用のため、**ユーザープロファイル配下ではなく exe と同階層**に置く。
@@ -169,7 +172,10 @@ SDK イベント → AppEvent の対応(ステップ2で実装。イベント名
   "copilotCliPath": null,
   "defaultModel": null,
   "logLevel": "info",
-  "sharedAgentsSource": null
+  "sharedAgentsSource": null,
+  "updateSource": null,
+  "maxConcurrentTasks": 2,
+  "logRetentionDays": 90
 }
 ```
 
