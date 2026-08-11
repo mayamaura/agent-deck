@@ -378,13 +378,31 @@ impl EventContext {
             return Vec::new();
         };
         self.subagent_started_at.insert(data.tool_call_id.clone(), Instant::now());
-        // envelope の agent_id がサブエージェント固有の識別子(docs/architecture.md §5)。
-        // 万一 started の時点で未付与でも tool_call_id で代替し、completed/failed 側の
-        // フォールバック(下記)と一貫させる。
-        let agent_id = ev.agent_id.clone().unwrap_or_else(|| data.tool_call_id.clone());
+        // 観測用(docs/development.md ステップ5、bin/step5_check.rs の実機検証で参照)。
+        eprintln!(
+            "[subagent.started] envelope agent_id={:?} tool_call_id={} agent_name={}",
+            ev.agent_id, data.tool_call_id, data.agent_name
+        );
+        // 相関方式(docs/development.md ステップ5。bin/step5_check.rs で実機確認済み、
+        // CLI 1.0.79 / SDK 1.0.9、2026-08-12): subagent.started の時点で envelope の
+        // agent_id は既に Some で付与されており、その値は「委任元の task ツール呼び出し
+        // の tool_call_id」と一致していた(= data.tool_call_id と同値)。その後の
+        // subagent.completed でも同じ agent_id が付与されることを確認済み
+        // (CORRELATION ログ参照)。したがって envelope 値をそのままツリーの行キーに
+        // 使うのが最も確実(on_tool_started/on_tool_completed は agent_id をそのまま
+        // 透過するだけで正しく相関する。サブエージェント自身がツールを呼ぶケースは
+        // 今回の観測プロンプトでは発生しなかったため個別確認はできていないが、
+        // envelope agent_id の伝播は tool.execution_* も含め SDK 側の共通機構
+        // なので同じ値になる見込み)。
+        // 万一将来のバージョンで subagent.started 時点の agent_id が None になった
+        // 場合の防御として、payload の agent_name を暫定キーにするフォールバックを
+        // 残す(同名サブエージェントが同一実行内で複数回呼ばれると行が併合される
+        // 制約が残るが、実機では一度も踏んでいない経路)。
+        let agent_id = ev.agent_id.clone().unwrap_or_else(|| data.agent_name.clone());
         vec![AppEvent::SubagentStarted {
             session_id: self.session_id.clone(),
             agent_id,
+            tool_call_id: data.tool_call_id,
             display_name: data.agent_display_name,
         }]
     }
@@ -399,10 +417,12 @@ impl EventContext {
             .map(|v| v.max(0) as u64)
             .or_else(|| started_at.map(|s| s.elapsed().as_millis() as u64))
             .unwrap_or(0);
-        let agent_id = ev.agent_id.clone().unwrap_or_else(|| data.tool_call_id.clone());
+        // on_subagent_started と同じ式(同じ agent_name なら同じ行に確定する)。
+        let agent_id = ev.agent_id.clone().unwrap_or_else(|| data.agent_name.clone());
         vec![AppEvent::SubagentCompleted {
             session_id: self.session_id.clone(),
             agent_id,
+            tool_call_id: data.tool_call_id,
             duration_ms,
             total_tokens: data.total_tokens.map(|v| v.max(0) as u64),
         }]
@@ -413,10 +433,11 @@ impl EventContext {
             return Vec::new();
         };
         self.subagent_started_at.remove(&data.tool_call_id);
-        let agent_id = ev.agent_id.clone().unwrap_or_else(|| data.tool_call_id.clone());
+        let agent_id = ev.agent_id.clone().unwrap_or_else(|| data.agent_name.clone());
         vec![AppEvent::SubagentFailed {
             session_id: self.session_id.clone(),
             agent_id,
+            tool_call_id: data.tool_call_id,
             error: data.error,
         }]
     }
@@ -429,6 +450,7 @@ impl EventContext {
         vec![AppEvent::ToolStarted {
             session_id: self.session_id.clone(),
             agent_id: ev.agent_id.clone(),
+            tool_call_id: data.tool_call_id,
             tool_name: data.tool_name,
         }]
     }
@@ -446,6 +468,7 @@ impl EventContext {
         vec![AppEvent::ToolCompleted {
             session_id: self.session_id.clone(),
             agent_id: ev.agent_id.clone(),
+            tool_call_id: data.tool_call_id,
             tool_name,
             success: data.success,
         }]

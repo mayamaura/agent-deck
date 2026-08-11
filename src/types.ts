@@ -35,11 +35,11 @@ export interface HistoryEntry {
 export type AppEvent =
   | { kind: "taskStarted"; sessionId: string; agentId: string; startedAt: string }
   | { kind: "agentIntent"; sessionId: string; agentId: string | null; text: string }
-  | { kind: "subagentStarted"; sessionId: string; agentId: string; displayName: string }
-  | { kind: "subagentCompleted"; sessionId: string; agentId: string; durationMs: number; totalTokens: number | null }
-  | { kind: "subagentFailed"; sessionId: string; agentId: string; error: string }
-  | { kind: "toolStarted"; sessionId: string; agentId: string | null; toolName: string }
-  | { kind: "toolCompleted"; sessionId: string; agentId: string | null; toolName: string; success: boolean }
+  | { kind: "subagentStarted"; sessionId: string; agentId: string; toolCallId: string; displayName: string }
+  | { kind: "subagentCompleted"; sessionId: string; agentId: string; toolCallId: string; durationMs: number; totalTokens: number | null }
+  | { kind: "subagentFailed"; sessionId: string; agentId: string; toolCallId: string; error: string }
+  | { kind: "toolStarted"; sessionId: string; agentId: string | null; toolCallId: string; toolName: string }
+  | { kind: "toolCompleted"; sessionId: string; agentId: string | null; toolCallId: string; toolName: string; success: boolean }
   | { kind: "permissionRequested"; sessionId: string; requestId: string; permissionKind: string; detail: string }
   | { kind: "usageUpdated"; sessionId: string; currentTokens: number; tokenLimit: number | null }
   | { kind: "taskCompleted"; sessionId: string; summary: string; outputFiles: string[] }

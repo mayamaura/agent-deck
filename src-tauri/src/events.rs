@@ -25,27 +25,34 @@ pub enum AppEvent {
     SubagentStarted {
         session_id: String,
         agent_id: String,
+        // ツリー上の行の同一性を保つための相関 ID(docs/development.md ステップ5)。
+        // subagent.started/completed/failed の payload に必ず含まれる。
+        tool_call_id: String,
         display_name: String,
     },
     SubagentCompleted {
         session_id: String,
         agent_id: String,
+        tool_call_id: String,
         duration_ms: u64,
         total_tokens: Option<u64>,
     },
     SubagentFailed {
         session_id: String,
         agent_id: String,
+        tool_call_id: String,
         error: String,
     },
     ToolStarted {
         session_id: String,
         agent_id: Option<String>,
+        tool_call_id: String,
         tool_name: String,
     },
     ToolCompleted {
         session_id: String,
         agent_id: Option<String>,
+        tool_call_id: String,
         tool_name: String,
         success: bool,
     },

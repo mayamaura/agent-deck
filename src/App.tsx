@@ -4,10 +4,12 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { AgentSettings, AgentSummary, AppEvent, HistoryEntry } from "./types";
 import { EVENT_CHANNEL } from "./types";
+import { buildTree } from "./tree";
+import type { AgentRow, TreeState } from "./tree";
 
 // 3 ペイン構成の骨格(docs/requirements.md §3.1)。
-// 実行ビューのツリー表示はステップ5で実装する。
-// このステップ(4)では入出力設定フォームと権限確認ダイアログを追加する。
+// 実行ビューはツリー表示(docs/requirements.md §3.3。このアプリの主目的)。
+// 生イベントの時系列ログ・トークン使用量・出力ファイルは詳細ペインへ移設。
 
 /** 設定フォームの編集用の状態。カンマ区切りテキストは保存時に配列へ分解する。 */
 interface ConfigFormState {
@@ -33,7 +35,7 @@ function splitList(text: string): string[] {
     .filter(Boolean);
 }
 
-/** イベント 1 件を短い日本語要約にする(kind ごとの switch。ツリー化はステップ5)。 */
+/** イベント 1 件を短い日本語要約にする(詳細ペインの時系列ログ用)。 */
 function summarize(ev: AppEvent): string {
   switch (ev.kind) {
     case "taskStarted":
@@ -70,6 +72,91 @@ interface LoggedEvent {
   event: AppEvent;
 }
 
+const STATUS_LABEL: Record<AgentRow["status"], string> = {
+  running: "▶ 実行中",
+  completed: "✅ 完了",
+  failed: "❌ 失敗",
+  cancelled: "⏹ 中断",
+};
+
+const TOOL_STATUS_LABEL: Record<"running" | "ok" | "failed", string> = {
+  running: "実行中",
+  ok: "完了",
+  failed: "失敗",
+};
+
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+/**
+ * 行の経過/確定時間(ミリ秒)。AppEvent には壁時計の終了時刻が無いため、
+ * 実行中は rowStartedAt(App.tsx が受信時刻で記録)と nowTick(1秒毎に更新)から
+ * 計算する。完了済みで確定値(サブエージェントの durationMs)があればそれを使う。
+ * 確定値が無い完了行(メイン、または duration_ms を持たない失敗)は、running が
+ * false になった時点で nowTick の更新も止まる(App.tsx 側)ため、最後の tick 値が
+ * そのまま確定値として表示される。
+ */
+function elapsedMsFor(row: AgentRow, rowStartedAt: Record<string, number>, nowTick: number): number | null {
+  if (row.status !== "running" && row.durationMs != null) return row.durationMs;
+  const start = rowStartedAt[row.key];
+  return start != null ? nowTick - start : null;
+}
+
+function AgentRowView({
+  row,
+  elapsedMs,
+  isSub,
+  onRespond,
+}: {
+  row: AgentRow;
+  elapsedMs: number | null;
+  isSub: boolean;
+  onRespond: (requestId: string, decision: boolean) => void;
+}) {
+  return (
+    <div className={isSub ? "agent-row sub" : "agent-row"}>
+      <div className="agent-row-header">
+        <span className="tree-marker">▼</span>
+        <strong>
+          {row.label}
+          {isSub && " (サブ)"}
+        </strong>
+        <span className={`status-badge status-${row.status}`}>{STATUS_LABEL[row.status]}</span>
+        {elapsedMs != null && <span className="muted">{formatDuration(elapsedMs)}</span>}
+        {row.status !== "running" && row.totalTokens != null && (
+          <span className="muted">{row.totalTokens} tokens</span>
+        )}
+      </div>
+      {row.currentIntent && <p className="agent-intent">現在: {row.currentIntent}</p>}
+      {row.error && <p className="error">⚠ {row.error}</p>}
+      {row.tools.length > 0 && (
+        <ul className="tool-list">
+          {row.tools.map((t) => (
+            <li key={t.toolCallId}>
+              🔧 {t.toolName} — {TOOL_STATUS_LABEL[t.status]}
+            </li>
+          ))}
+        </ul>
+      )}
+      {row.pendingPermissions.map((p) => (
+        <div key={p.requestId} className="permission-dialog">
+          <span>⚠ 承認が必要: {p.detail}</span>
+          <button type="button" onClick={() => onRespond(p.requestId, true)}>
+            承認
+          </button>
+          <button type="button" onClick={() => onRespond(p.requestId, false)}>
+            拒否
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function App() {
   const [agents, setAgents] = useState<AgentSummary[]>([]);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
@@ -87,10 +174,11 @@ export default function App() {
   const [form, setForm] = useState<ConfigFormState>(EMPTY_FORM);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
 
-  // Ask になった権限要求のうち、まだ応答していないもの(docs/architecture.md §7.1)。
-  const [pendingPermissions, setPendingPermissions] = useState<
-    Record<string, { permissionKind: string; detail: string }>
-  >({});
+  // 応答済みの権限要求 requestId(docs/tree.ts の buildTree 第2引数)。
+  const [respondedRequestIds, setRespondedRequestIds] = useState<Set<string>>(new Set());
+  // 行ごとの経過時間計算用の開始時刻(受信時刻, epoch ms)。key は tree.ts の AgentRow.key。
+  const [rowStartedAt, setRowStartedAt] = useState<Record<string, number>>({});
+  const [nowTick, setNowTick] = useState(() => Date.now());
 
   useEffect(() => {
     invoke<AgentSummary[]>("list_agents")
@@ -131,28 +219,43 @@ export default function App() {
   }, [selected, configs]);
 
   // タスク実行イベントの購読(docs/architecture.md §4: 単一チャネルを kind で判別)。
+  // 実行ビューはタスクごとに新しくなるため、taskStarted でログ・応答済み集合・
+  // 経過時間の起点をリセットする。
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     listen<AppEvent>(EVENT_CHANNEL, ({ payload: ev }) => {
-      setEvents((prev) => [...prev, { time: new Date().toLocaleTimeString(), event: ev }]);
-      // 実行中フラグは taskStarted / taskCompleted / taskFailed / taskCancelled から導出する。
+      const logged: LoggedEvent = { time: new Date().toLocaleTimeString(), event: ev };
+      setEvents((prev) => (ev.kind === "taskStarted" ? [logged] : [...prev, logged]));
+
       if (ev.kind === "taskStarted") {
         setRunning(true);
         setSessionId(ev.sessionId);
-        setPendingPermissions({});
+        setRespondedRequestIds(new Set());
+        setRowStartedAt({ main: Date.now() });
+        setNowTick(Date.now());
+      } else if (ev.kind === "subagentStarted") {
+        setRowStartedAt((prev) => ({ ...prev, [ev.agentId]: Date.now() }));
       } else if (ev.kind === "taskCompleted" || ev.kind === "taskFailed" || ev.kind === "taskCancelled") {
         setRunning(false);
-      } else if (ev.kind === "permissionRequested") {
-        setPendingPermissions((prev) => ({
-          ...prev,
-          [ev.requestId]: { permissionKind: ev.permissionKind, detail: ev.detail },
-        }));
       }
     }).then((fn) => {
       unlisten = fn;
     });
     return () => unlisten?.();
   }, []);
+
+  // 経過時間の表示更新(実行中は1秒ごと。running が false になると自動的に止まり、
+  // その時点の nowTick が「確定値」として残る)。
+  useEffect(() => {
+    if (!running) return;
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [running]);
+
+  const tree: TreeState = buildTree(
+    events.map((e) => e.event),
+    respondedRequestIds,
+  );
 
   async function handleRun() {
     if (!selected || !prompt.trim() || running) return;
@@ -201,11 +304,7 @@ export default function App() {
   async function respondPermission(requestId: string, decision: boolean) {
     try {
       await invoke("respond_permission", { requestId, decision });
-      setPendingPermissions((prev) => {
-        const next = { ...prev };
-        delete next[requestId];
-        return next;
-      });
+      setRespondedRequestIds((prev) => new Set(prev).add(requestId));
     } catch (e) {
       setRunError(String(e));
     }
@@ -319,29 +418,32 @@ export default function App() {
               {running && <button onClick={handleCancel}>中断</button>}
             </div>
             {runError && <p className="error">⚠ {runError}</p>}
-            <ul className="event-log">
-              {events.map((e, i) => {
-                const ev = e.event;
-                const requestId = ev.kind === "permissionRequested" ? ev.requestId : undefined;
-                const pending = requestId ? pendingPermissions[requestId] : undefined;
-                return (
-                  <li key={i} className={ev.kind === "taskFailed" ? "error" : undefined}>
-                    <span className="muted">{e.time}</span> [{ev.kind}] {summarize(ev)}
-                    {pending && requestId && (
-                      <div className="permission-dialog">
-                        <span>⚠ 承認が必要: {pending.detail}</span>
-                        <button type="button" onClick={() => respondPermission(requestId, true)}>
-                          承認
-                        </button>
-                        <button type="button" onClick={() => respondPermission(requestId, false)}>
-                          拒否
-                        </button>
-                      </div>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
+            {tree.main && (
+              <div className="agent-tree">
+                <AgentRowView
+                  row={tree.main}
+                  elapsedMs={elapsedMsFor(tree.main, rowStartedAt, nowTick)}
+                  isSub={false}
+                  onRespond={respondPermission}
+                />
+                {tree.subagents.map((sub) => (
+                  <div className="sub-indent" key={sub.key}>
+                    <AgentRowView
+                      row={sub}
+                      elapsedMs={elapsedMsFor(sub, rowStartedAt, nowTick)}
+                      isSub
+                      onRespond={respondPermission}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+            {tree.taskStatus === "completed" && tree.summary && (
+              <div className="task-summary">
+                <h3>結果</h3>
+                <p>{tree.summary}</p>
+              </div>
+            )}
           </>
         ) : (
           <p className="muted">左の一覧からエージェントを選択してください</p>
@@ -349,7 +451,30 @@ export default function App() {
       </main>
       <aside className="pane detail">
         <h2>詳細</h2>
-        <p className="muted">ログ・トークン・出力ファイル(ステップ2以降)</p>
+        {tree.usage && (
+          <p className="muted">
+            トークン使用量: {tree.usage.currentTokens}
+            {tree.usage.tokenLimit != null ? ` / ${tree.usage.tokenLimit}` : ""}
+          </p>
+        )}
+        {tree.outputFiles.length > 0 && (
+          <div>
+            <h3>出力ファイル</h3>
+            <ul>
+              {tree.outputFiles.map((f) => (
+                <li key={f}>{f}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        <h3>ログ</h3>
+        <ul className="event-log">
+          {events.map((e, i) => (
+            <li key={i} className={e.event.kind === "taskFailed" ? "error" : undefined}>
+              <span className="muted">{e.time}</span> [{e.event.kind}] {summarize(e.event)}
+            </li>
+          ))}
+        </ul>
       </aside>
       <footer className="pane history">
         <h2>実行履歴</h2>

@@ -69,8 +69,10 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin smoke
   CLI 記法のパターン照合(`shell(python:*)` 等)。境界ケースは `cargo run --bin step4_check` で
   実機3ラウンド検証済み(自動承認 / Ask→拒否で中断+ファイル無し / Ask→承認)。
   権限要求の実形(fileName / fullCommandText)は sdk-notes.md に記録
-- [ ] **ステップ5: ツリー表示**
-  `agent_id` を使ったツリー構築と描画。サブエージェントが実際に起動するプロンプトで確認
+- [x] **ステップ5: ツリー表示**(2026-08-12 完了)
+  `buildTree` 純関数(src/tree.ts、vitest 9 ケース)+ 実行ビューのツリー描画。
+  実機で委任を観測し相関確定(`agent_id` = 委任元 task ツールの tool_call_id、sdk-notes.md 参照)。
+  検証: `npx vitest run` と `cargo run --bin step5_check`
 - [ ] **ステップ6: 履歴**
   history.jsonl への追記(実装済み: `history.rs` の `append`)をタスク完了処理に接続し、一覧表示
 

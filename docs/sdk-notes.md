@@ -145,6 +145,15 @@ session.background_tasks_changed
   その場合は shell として Ask に倒れる(安全側)。出力フォルダ自動承認を効かせたい業務エージェントは
   Instructions に「ファイル出力は write ツールで行う」と明記すること(agents/ のサンプル参照)
 
+### サブエージェント相関(2026-08-12 ステップ5実機観測)
+
+- 委任はメインエージェントの **`task` ツール呼び出し**として現れる(この呼び出し自体は agent_id 無し=メイン行)
+- `subagent.started` のエンベロープ `agent_id` はその時点で Some であり、
+  **値は委任元 `task` ツール呼び出しの `tool_call_id` と同値**。後続の `subagent.completed` も同じ
+  `agent_id` を持ち、相関は成立(実機で不一致 0 件)
+- `PermissionRequested` にはエージェント相関 ID が無い → ツリー表示は「直近に活動した行」への
+  ヒューリスティック帰属(v0.1 は逐次実行なので成立。並行化時に要見直し — tree.ts に ponytail 注記)
+
 ### 中断
 
 - **タスク中断の正道は `Session::abort()`**(`session.abort` RPC)。進行中の `send_and_wait` は
