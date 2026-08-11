@@ -109,6 +109,7 @@ async fn main() {
         session_model: None,
         rules: config::AgentSettings::default(),
         bridge: copilot::PermissionBridge::new(),
+        unattended: false,
     };
 
     let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();

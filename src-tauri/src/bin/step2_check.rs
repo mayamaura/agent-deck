@@ -69,6 +69,7 @@ async fn main() {
         session_model: None,
         rules: config::AgentSettings::default(),
         bridge: copilot::PermissionBridge::new(),
+        unattended: false,
     };
     let run = tokio::spawn(copilot::run_task(cli_path, spec, cancel_rx, sink));
 

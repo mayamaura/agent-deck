@@ -72,6 +72,29 @@ export interface HistoryEntry {
   outputFiles: string[];
   totalTokens: number | null;
   subagents: { name: string; durationMs: number }[];
+  // "manual" / "scheduled"(docs/roadmap.md v0.4)。
+  trigger: "manual" | "scheduled";
+}
+
+// src-tauri/src/schedule.rs Recurrence(weekday: 0=日〜6=土)
+export type Recurrence =
+  | { type: "daily"; time: string }
+  | { type: "weekly"; weekday: number; time: string }
+  | { type: "monthly"; day: number; time: string };
+
+// src-tauri/src/schedule.rs Schedule(data/schedules.json の1件)
+export interface Schedule {
+  id: string;
+  agentId: string;
+  prompt: string;
+  recurrence: Recurrence;
+  enabled: boolean;
+  lastRunAt: string | null;
+}
+
+// src-tauri/src/main.rs QueueStatusDto(get_queue_status の戻り値)
+export interface QueueStatusDto {
+  queued: number;
 }
 
 // src-tauri/src/events.rs AppEvent(kind でタグ付けされた単一チャネル "agent://event")

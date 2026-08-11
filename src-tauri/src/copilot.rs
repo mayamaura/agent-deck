@@ -70,6 +70,10 @@ pub struct TaskSpec {
     pub rules: permissions::PermissionRules,
     /// respond_permission コマンドと run_task の PermissionHandler を橋渡しする。
     pub bridge: Arc<PermissionBridge>,
+    /// 無人実行(スケジュール実行)か(docs/roadmap.md v0.4)。true のとき、Ask になった
+    /// 権限要求は PermissionRequested を emit せず即座に拒否して実行全体を中断する
+    /// (無人実行と承認ダイアログは両立しないため)。
+    pub unattended: bool,
 }
 
 /// UI からの承認応答を届けるブリッジ。main.rs の respond_permission コマンドと共有する
@@ -193,12 +197,15 @@ struct UiPermissionHandler {
     rules: permissions::PermissionRules,
     bridge: Arc<PermissionBridge>,
     sink: Arc<dyn Fn(AppEvent) + Send + Sync>,
-    /// ユーザーが拒否した際に run_task の select ループへ中断を伝える。
-    abort_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    /// ユーザーが拒否した(または無人実行で自動拒否した)際に run_task の select ループへ
+    /// 中断を伝える。送る値は TaskFailed.error にそのまま使う理由文言。
+    abort_tx: tokio::sync::mpsc::UnboundedSender<String>,
     /// 承認された(自動承認・ユーザー承認とも)書き込み先の絶対パスを集める共有コレクタ。
     /// run_task が作成し、EventContext とも同じ Arc を共有する(RunOutcome.output_files /
     /// TaskCompleted.output_files に同じ一覧を使うため。docs/development.md ステップ6)。
     output_files: Arc<std::sync::Mutex<Vec<PathBuf>>>,
+    /// 無人実行フラグ(docs/roadmap.md v0.4)。TaskSpec.unattended をそのまま持つ。
+    unattended: bool,
 }
 
 impl PermissionHandler for UiPermissionHandler {
@@ -236,6 +243,13 @@ impl PermissionHandler for UiPermissionHandler {
                         Some(d) if !d.is_empty() => format!("{}: {d}", input.tool_name),
                         _ => input.tool_name.clone(),
                     };
+                    if self.unattended {
+                        // 無人実行と承認ダイアログは両立しない(docs/roadmap.md v0.4)。
+                        // PermissionRequested は emit せず即座に拒否し、実行全体を中断する。
+                        let reason = format!("無人実行のため、事前承認されていない操作を拒否しました: {detail}");
+                        let _ = self.abort_tx.send(reason.clone());
+                        return PermissionResult::reject(reason);
+                    }
                     let request_id_str = request_id.to_string();
                     (self.sink)(AppEvent::PermissionRequested {
                         session_id: session_id.to_string(),
@@ -253,7 +267,7 @@ impl PermissionHandler for UiPermissionHandler {
                         }
                         Ok(false) => {
                             // タスク全体を止める(拒否は個々のツール呼び出しだけでなく実行全体の中断)。
-                            let _ = self.abort_tx.send(());
+                            let _ = self.abort_tx.send("権限が拒否されたため実行を中断しました".to_string());
                             PermissionResult::reject("ユーザーが拒否しました".to_string())
                         }
                         Err(_) => {
@@ -331,6 +345,9 @@ pub struct EventContext {
     /// run_task が abort() を呼んだ理由。session.idle(aborted=true) 到達時に
     /// TaskCancelled / TaskFailed のどちらを emit するか決めるために使う。
     abort_reason: Option<AbortReason>,
+    /// abort_reason が PermissionDenied のときに TaskFailed.error として使う文言
+    /// (ユーザー拒否/無人実行拒否で文言を変えるため。docs/roadmap.md v0.4)。
+    abort_message: Option<String>,
     /// assistant.usage の input_tokens+output_tokens の総和(取れた分)。RunOutcome.total_tokens に使う。
     total_tokens: Option<u64>,
     /// subagent.completed/failed で確定した (name, duration_ms) の列。RunOutcome.subagents に使う。
@@ -354,6 +371,7 @@ impl EventContext {
             subagent_started_at: HashMap::new(),
             tool_names: HashMap::new(),
             abort_reason: None,
+            abort_message: None,
             total_tokens: None,
             subagent_outcomes: Vec::new(),
             output_files: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -364,6 +382,13 @@ impl EventContext {
     /// run_task からのみ呼ぶため pub にしない(AbortReason 自体も非公開のため)。
     fn set_abort_reason(&mut self, reason: AbortReason) {
         self.abort_reason = Some(reason);
+    }
+
+    /// 権限拒否による中断を、TaskFailed.error に使う文言つきで記録する
+    /// (ユーザー拒否/無人実行拒否で文言が異なる。docs/roadmap.md v0.4)。
+    fn set_permission_denied(&mut self, message: String) {
+        self.abort_reason = Some(AbortReason::PermissionDenied);
+        self.abort_message = Some(message);
     }
 
     /// 1 SDK イベント → 0..n 個の AppEvent。対応表は docs/architecture.md §4。
@@ -554,7 +579,10 @@ impl EventContext {
                 // 権限拒否による中断は「失敗」として扱う(受け入れ条件7)。
                 Some(AbortReason::PermissionDenied) => vec![AppEvent::TaskFailed {
                     session_id: self.session_id.clone(),
-                    error: "権限が拒否されたため実行を中断しました".to_string(),
+                    error: self
+                        .abort_message
+                        .clone()
+                        .unwrap_or_else(|| "権限が拒否されたため実行を中断しました".to_string()),
                 }],
                 _ => vec![AppEvent::TaskCancelled { session_id: self.session_id.clone() }],
             };
@@ -670,8 +698,9 @@ pub async fn run_task(
     // 同じ関数を共有させる。
     let sink: Arc<dyn Fn(AppEvent) + Send + Sync> = Arc::new(sink);
     let bridge = spec.bridge.clone();
-    // ユーザーが権限要求を拒否した際に、PermissionHandler から select ループへ中断を伝える経路。
-    let (deny_abort_tx, mut deny_abort_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    // ユーザーが権限要求を拒否した(または無人実行で自動拒否した)際に、PermissionHandler から
+    // select ループへ中断を伝える経路。送る値はそのまま TaskFailed.error の文言に使う。
+    let (deny_abort_tx, mut deny_abort_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     // 承認された書き込み先の共有コレクタ。UiPermissionHandler と EventContext の両方に
     // 同じ Arc を渡す(RunOutcome.output_files / TaskCompleted.output_files を一致させるため)。
     let output_files: Arc<std::sync::Mutex<Vec<PathBuf>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -681,6 +710,7 @@ pub async fn run_task(
         sink: Arc::clone(&sink),
         abort_tx: deny_abort_tx,
         output_files: Arc::clone(&output_files),
+        unattended: spec.unattended,
     });
 
     // rules.denied_tools のうち括弧を含まない単純名(例 "write")は SessionConfig の
@@ -755,10 +785,10 @@ pub async fn run_task(
                     eprintln!("セッションの中断に失敗しました: {e}");
                 }
             }
-            _ = deny_abort_rx.recv(), if !permission_abort_requested => {
+            Some(reason) = deny_abort_rx.recv(), if !permission_abort_requested => {
                 permission_abort_requested = true;
                 // 受け入れ条件7: 権限拒否は実行全体の中断につながる。
-                ctx.set_abort_reason(AbortReason::PermissionDenied);
+                ctx.set_permission_denied(reason);
                 if let Err(e) = session.abort().await {
                     eprintln!("セッションの中断に失敗しました: {e}");
                 }

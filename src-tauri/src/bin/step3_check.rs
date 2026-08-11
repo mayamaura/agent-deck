@@ -117,6 +117,7 @@ async fn run_round1(cli_path: &PathBuf, greeter: &agents::AgentDefinition, agent
         session_model: None,
         rules: config::AgentSettings::default(),
         bridge: copilot::PermissionBridge::new(),
+        unattended: false,
     };
     let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
@@ -169,6 +170,7 @@ async fn run_round2(cli_path: PathBuf, greeter: &agents::AgentDefinition, agent_
         session_model: None,
         rules: config::AgentSettings::default(),
         bridge: copilot::PermissionBridge::new(),
+        unattended: false,
     };
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();

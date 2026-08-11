@@ -126,6 +126,7 @@ async fn run_task_and_collect(
         session_model: None,
         rules,
         bridge: bridge.clone(),
+        unattended: false,
     };
     let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();

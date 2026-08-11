@@ -20,6 +20,14 @@ pub struct HistoryEntry {
     pub total_tokens: Option<u64>,
     #[serde(default)]
     pub subagents: Vec<SubagentRecord>,
+    /// "manual" / "scheduled"(docs/roadmap.md v0.4)。旧バージョンの履歴行には無いため、
+    /// 欠落時は "manual" 扱い(後方互換)。
+    #[serde(default = "default_trigger")]
+    pub trigger: String,
+}
+
+fn default_trigger() -> String {
+    "manual".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,7 +40,8 @@ pub struct SubagentRecord {
 /// RunOutcome(copilot::run_task の戻り値)から履歴 1 行分を組み立てる。
 /// copilot::RunOutcome を引数に取るが、SDK の型ではなくアプリ独自の型なのでモジュール境界として許容する
 /// (docs/architecture.md §4: SDK の型を直接流さない、の対象は SDK 型そのもの)。
-pub fn entry_from_outcome(agent_id: &str, prompt: &str, outcome: &RunOutcome) -> HistoryEntry {
+/// trigger は "manual" / "scheduled"(docs/roadmap.md v0.4)。
+pub fn entry_from_outcome(agent_id: &str, prompt: &str, outcome: &RunOutcome, trigger: &str) -> HistoryEntry {
     let status = match outcome.status {
         TaskStatus::Completed => "completed",
         TaskStatus::Failed => "failed",
@@ -52,6 +61,7 @@ pub fn entry_from_outcome(agent_id: &str, prompt: &str, outcome: &RunOutcome) ->
             .iter()
             .map(|s| SubagentRecord { name: s.name.clone(), duration_ms: s.duration_ms })
             .collect(),
+        trigger: trigger.to_string(),
     }
 }
 

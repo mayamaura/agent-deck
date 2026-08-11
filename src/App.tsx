@@ -9,6 +9,9 @@ import type {
   AppConfigDto,
   AppEvent,
   HistoryEntry,
+  QueueStatusDto,
+  Recurrence,
+  Schedule,
   SyncSummary,
   UpdateInfoDto,
 } from "./types";
@@ -47,6 +50,50 @@ interface DefinitionFormState {
 }
 
 const EMPTY_DEF_FORM: DefinitionFormState = { name: "", description: "", model: "", tools: "", body: "" };
+
+/** スケジュール追加・編集フォームの状態(docs/roadmap.md v0.4)。周期の種類ごとの
+ * フィールド(weekday/day)は保存時に選択中の type のものだけを Recurrence へ詰める。 */
+interface ScheduleFormState {
+  id: string | null;
+  agentId: string;
+  prompt: string;
+  type: Recurrence["type"];
+  time: string;
+  weekday: number;
+  day: number;
+  enabled: boolean;
+  lastRunAt: string | null;
+}
+
+const EMPTY_SCHEDULE_FORM: ScheduleFormState = {
+  id: null,
+  agentId: "",
+  prompt: "",
+  type: "daily",
+  time: "09:00",
+  weekday: 1,
+  day: 1,
+  enabled: true,
+  lastRunAt: null,
+};
+
+const WEEKDAY_LABELS = ["日", "月", "火", "水", "木", "金", "土"];
+
+function formatRecurrence(r: Recurrence): string {
+  switch (r.type) {
+    case "daily":
+      return `毎日 ${r.time}`;
+    case "weekly":
+      return `毎週${WEEKDAY_LABELS[r.weekday] ?? "?"}曜 ${r.time}`;
+    case "monthly":
+      return `毎月${r.day}日 ${r.time}`;
+  }
+}
+
+const TRIGGER_LABEL: Record<HistoryEntry["trigger"], string> = {
+  manual: "🖐 手動",
+  scheduled: "⏰ 定期",
+};
 
 function splitList(text: string): string[] {
   return text
@@ -215,6 +262,13 @@ export default function App() {
   const [updateCheckError, setUpdateCheckError] = useState<string | null>(null);
   const [openUpdateFolderError, setOpenUpdateFolderError] = useState<string | null>(null);
 
+  // スケジュール管理(docs/roadmap.md v0.4)。
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [scheduleForm, setScheduleForm] = useState<ScheduleFormState>(EMPTY_SCHEDULE_FORM);
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
+  const [scheduleSaveStatus, setScheduleSaveStatus] = useState<string | null>(null);
+  const [queueStatus, setQueueStatus] = useState<QueueStatusDto | null>(null);
+
   // 応答済みの権限要求 requestId(docs/tree.ts の buildTree 第2引数)。
   const [respondedRequestIds, setRespondedRequestIds] = useState<Set<string>>(new Set());
   const [outputFolderError, setOutputFolderError] = useState<string | null>(null);
@@ -230,8 +284,27 @@ export default function App() {
     }
   }
 
+  async function reloadSchedules() {
+    try {
+      setSchedules(await invoke<Schedule[]>("list_schedules"));
+    } catch (e) {
+      setScheduleError(String(e));
+    }
+  }
+
+  async function reloadQueueStatus() {
+    try {
+      setQueueStatus(await invoke<QueueStatusDto>("get_queue_status"));
+    } catch (e) {
+      // 待機件数表示はベストエフォート(取得失敗を UI のエラー欄で騒がない)。
+      console.error("待機中スケジュール件数の取得に失敗しました:", e);
+    }
+  }
+
   useEffect(() => {
     reloadAgents();
+    reloadSchedules();
+    reloadQueueStatus();
     invoke<HistoryEntry[]>("list_history", { limit: 20 })
       .then(setHistory)
       .catch((e) => setError(String(e)));
@@ -315,6 +388,8 @@ export default function App() {
         setRespondedRequestIds(new Set());
         setRowStartedAt({ main: Date.now() });
         setNowTick(Date.now());
+        // スケジュール実行がキューから1件消費されたはずなので待機件数を更新する。
+        reloadQueueStatus();
       } else if (ev.kind === "subagentStarted") {
         setRowStartedAt((prev) => ({ ...prev, [ev.agentId]: Date.now() }));
       } else if (ev.kind === "taskCompleted" || ev.kind === "taskFailed" || ev.kind === "taskCancelled") {
@@ -323,6 +398,8 @@ export default function App() {
         invoke<HistoryEntry[]>("list_history", { limit: 20 })
           .then(setHistory)
           .catch((e) => setError(String(e)));
+        reloadQueueStatus();
+        reloadSchedules();
       }
     }).then((fn) => {
       unlisten = fn;
@@ -457,6 +534,65 @@ export default function App() {
       });
     } catch (e) {
       setDefinitionError(String(e));
+    }
+  }
+
+  function handleNewSchedule() {
+    setScheduleForm(EMPTY_SCHEDULE_FORM);
+    setScheduleSaveStatus(null);
+  }
+
+  function handleEditSchedule(s: Schedule) {
+    setScheduleForm({
+      id: s.id,
+      agentId: s.agentId,
+      prompt: s.prompt,
+      type: s.recurrence.type,
+      time: s.recurrence.time,
+      weekday: s.recurrence.type === "weekly" ? s.recurrence.weekday : EMPTY_SCHEDULE_FORM.weekday,
+      day: s.recurrence.type === "monthly" ? s.recurrence.day : EMPTY_SCHEDULE_FORM.day,
+      enabled: s.enabled,
+      lastRunAt: s.lastRunAt,
+    });
+    setScheduleSaveStatus(null);
+  }
+
+  async function handleSaveSchedule() {
+    if (!scheduleForm.agentId || !scheduleForm.prompt.trim()) return;
+    setScheduleSaveStatus(null);
+    const recurrence: Recurrence =
+      scheduleForm.type === "daily"
+        ? { type: "daily", time: scheduleForm.time }
+        : scheduleForm.type === "weekly"
+          ? { type: "weekly", weekday: scheduleForm.weekday, time: scheduleForm.time }
+          : { type: "monthly", day: scheduleForm.day, time: scheduleForm.time };
+    const schedule: Schedule = {
+      id: scheduleForm.id ?? crypto.randomUUID(),
+      agentId: scheduleForm.agentId,
+      prompt: scheduleForm.prompt,
+      recurrence,
+      enabled: scheduleForm.enabled,
+      lastRunAt: scheduleForm.lastRunAt,
+    };
+    try {
+      await invoke("save_schedule", { schedule });
+      setScheduleSaveStatus("✅ 保存しました");
+      setScheduleForm(EMPTY_SCHEDULE_FORM);
+      await reloadSchedules();
+    } catch (e) {
+      setScheduleSaveStatus(`⚠ 保存に失敗しました: ${e}`);
+    }
+  }
+
+  async function handleDeleteSchedule(id: string) {
+    if (!window.confirm("このスケジュールを削除しますか?")) return;
+    setScheduleError(null);
+    try {
+      await invoke("delete_schedule", { id });
+      if (scheduleForm.id === id) setScheduleForm(EMPTY_SCHEDULE_FORM);
+      await reloadSchedules();
+    } catch (e) {
+      setScheduleError(String(e));
     }
   }
 
@@ -802,9 +938,143 @@ export default function App() {
             <p className="muted">更新はありません(現在 v{appConfig?.currentVersion ?? "?"})</p>
           )}
         </div>
+        <div className="shared-settings">
+          <h3>スケジュール</h3>
+          <p className="muted">スケジュールはアプリ起動中のみ動作します。</p>
+          {schedules.length === 0 ? (
+            <p className="muted">スケジュールはまだありません</p>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>エージェント</th>
+                  <th>周期</th>
+                  <th>状態</th>
+                  <th>最終実行</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {schedules.map((s) => (
+                  <tr key={s.id}>
+                    <td>{s.agentId}</td>
+                    <td>{formatRecurrence(s.recurrence)}</td>
+                    <td>{s.enabled ? "有効" : "無効"}</td>
+                    <td>{s.lastRunAt ?? "—"}</td>
+                    <td>
+                      <button type="button" onClick={() => handleEditSchedule(s)}>
+                        編集
+                      </button>
+                      <button type="button" onClick={() => handleDeleteSchedule(s.id)}>
+                        削除
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <p className="muted">{scheduleForm.id ? "スケジュールの編集" : "スケジュールの追加"}</p>
+          <label>
+            エージェント
+            <select
+              value={scheduleForm.agentId}
+              onChange={(e) => setScheduleForm((f) => ({ ...f, agentId: e.target.value }))}
+            >
+              <option value="">選択してください</option>
+              {agents.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            プロンプト
+            <textarea
+              className="prompt-input"
+              rows={2}
+              value={scheduleForm.prompt}
+              onChange={(e) => setScheduleForm((f) => ({ ...f, prompt: e.target.value }))}
+            />
+          </label>
+          <label>
+            周期
+            <select
+              value={scheduleForm.type}
+              onChange={(e) =>
+                setScheduleForm((f) => ({ ...f, type: e.target.value as ScheduleFormState["type"] }))
+              }
+            >
+              <option value="daily">毎日</option>
+              <option value="weekly">毎週</option>
+              <option value="monthly">毎月</option>
+            </select>
+          </label>
+          {scheduleForm.type === "weekly" && (
+            <label>
+              曜日
+              <select
+                value={scheduleForm.weekday}
+                onChange={(e) => setScheduleForm((f) => ({ ...f, weekday: Number(e.target.value) }))}
+              >
+                {WEEKDAY_LABELS.map((label, i) => (
+                  <option key={label} value={i}>
+                    {label}曜
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {scheduleForm.type === "monthly" && (
+            <label>
+              日(29〜31日は月末に丸められます)
+              <input
+                type="number"
+                min={1}
+                max={31}
+                value={scheduleForm.day}
+                onChange={(e) => setScheduleForm((f) => ({ ...f, day: Number(e.target.value) }))}
+              />
+            </label>
+          )}
+          <label>
+            時刻
+            <input
+              type="time"
+              value={scheduleForm.time}
+              onChange={(e) => setScheduleForm((f) => ({ ...f, time: e.target.value }))}
+            />
+          </label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={scheduleForm.enabled}
+              onChange={(e) => setScheduleForm((f) => ({ ...f, enabled: e.target.checked }))}
+            />
+            有効
+          </label>
+          <div className="run-controls">
+            <button
+              type="button"
+              onClick={handleSaveSchedule}
+              disabled={!scheduleForm.agentId || !scheduleForm.prompt.trim()}
+            >
+              保存
+            </button>
+            {scheduleForm.id && (
+              <button type="button" onClick={handleNewSchedule}>
+                新規作成に戻る
+              </button>
+            )}
+          </div>
+          {scheduleSaveStatus && <p className="muted">{scheduleSaveStatus}</p>}
+          {scheduleError && <p className="error">⚠ {scheduleError}</p>}
+        </div>
       </aside>
       <main className="pane run">
         <h2>実行ビュー</h2>
+        <p className="muted">待機中のスケジュール実行: {queueStatus?.queued ?? 0} 件</p>
         {selected ? (
           <>
             <p className="muted">{agents.find((a) => a.id === selected)?.description}</p>
@@ -900,6 +1170,7 @@ export default function App() {
               <tr>
                 <th>開始</th>
                 <th>エージェント</th>
+                <th>種別</th>
                 <th>状態</th>
                 <th>所要</th>
                 <th>トークン</th>
@@ -910,6 +1181,7 @@ export default function App() {
                 <tr key={h.sessionId}>
                   <td>{h.startedAt}</td>
                   <td>{h.agentId}</td>
+                  <td>{TRIGGER_LABEL[h.trigger]}</td>
                   <td>
                     {h.status === "completed" ? "✅ 完了" : h.status === "failed" ? "❌ 失敗" : "⏹ 中断"}
                     {/* 完成品か途中で止まったものかを判別できるようにする(docs/architecture.md §8.3)。 */}

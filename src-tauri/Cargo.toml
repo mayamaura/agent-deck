@@ -1,7 +1,7 @@
 # バージョンは 2026-08-12 に crates.io で確認(docs/sdk-notes.md 参照)
 [package]
 name = "agent-deck"
-version = "0.3.0"
+version = "0.4.0"
 description = "Copilot エージェントに定型業務を依頼し、稼働状況をリアルタイム表示するデスクトップアプリ"
 edition = "2021"
 # 検証バイナリ(smoke / stepN_check)があるため、tauri dev の cargo run 対象を明示
@@ -30,3 +30,9 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"
 # 更新ファイルの検証(v0.3 で使う想定)に必須。RustCrypto の標準実装で、非公式 Copilot 連携ではない
 # ため §1.1 の禁止対象外。10.10 は 2026-08-12 に crates.io で確認した最新版。
 sha2 = "0.10"
+# v0.4 定期実行(docs/roadmap.md v0.4)。スケジュールの次回発火計算にローカル時刻のカレンダー演算
+# (曜日・月末丸め)が必要で std には無い。日付演算の自前実装は月末・閏年のバグ源になるため
+# 標準実装を使う。
+chrono = { version = "0.4", features = ["clock"] }
+# v0.4 完了・失敗の Windows トースト通知(docs/roadmap.md v0.4)。公式 Tauri プラグイン。
+tauri-plugin-notification = "2"

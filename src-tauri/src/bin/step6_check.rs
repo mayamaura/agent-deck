@@ -107,6 +107,7 @@ async fn run_task_and_collect(
         session_model: None,
         rules,
         bridge: bridge.clone(),
+        unattended: false,
     };
     let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
@@ -212,7 +213,7 @@ async fn run_round_a(cli_path: &PathBuf, ws: &PathBuf, out: &PathBuf, temp_data:
         return false;
     }
 
-    let entry = history::entry_from_outcome("writer", &prompt, run_outcome);
+    let entry = history::entry_from_outcome("writer", &prompt, run_outcome, "manual");
     if let Err(e) = history::append(temp_data, &entry) {
         eprintln!("ラウンドA失敗: history::append に失敗しました: {e}");
         return false;
@@ -274,6 +275,7 @@ async fn run_round_b(cli_path: PathBuf, ws: PathBuf, temp_data: PathBuf) -> bool
         session_model: None,
         rules: config::AgentSettings::default(),
         bridge: copilot::PermissionBridge::new(),
+        unattended: false,
     };
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
@@ -344,7 +346,7 @@ async fn run_round_b(cli_path: PathBuf, ws: PathBuf, temp_data: PathBuf) -> bool
         return false;
     }
 
-    let entry = history::entry_from_outcome("counter", &prompt, &run_outcome);
+    let entry = history::entry_from_outcome("counter", &prompt, &run_outcome, "manual");
     if let Err(e) = history::append(&temp_data, &entry) {
         eprintln!("ラウンドB失敗: history::append に失敗しました: {e}");
         return false;

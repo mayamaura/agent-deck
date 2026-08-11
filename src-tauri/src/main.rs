@@ -7,12 +7,15 @@ mod copilot;
 mod events;
 mod history;
 mod permissions;
+mod schedule;
 mod sync;
 mod update;
 
 use config::{AgentSettings, AppConfig};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
 use tauri::{Emitter, Manager, State};
 
 /// v0.1 の同時実行数上限。1 本固定だが、上限をこの定数に集約しておくことで
@@ -27,6 +30,13 @@ struct RunningTask {
     cancel: tokio::sync::oneshot::Sender<()>,
 }
 
+/// スケジュール発火 → キュー投入された 1 件(docs/roadmap.md v0.4: 発火が重なっても
+/// キューで直列消化する)。
+struct QueuedRun {
+    agent_id: String,
+    prompt: String,
+}
+
 /// data/ の解決結果を保持する。解決に失敗した場合もエラーを保持し、
 /// 各コマンドがフロントへ理由を返す(docs/architecture.md §6.1: 起動時にエラーを出す)。
 struct AppState {
@@ -36,6 +46,8 @@ struct AppState {
     /// respond_permission コマンドと copilot::run_task の PermissionHandler を橋渡しする
     /// (docs/architecture.md §7.1)。
     bridge: std::sync::Arc<copilot::PermissionBridge>,
+    /// スケジュール実行の待機キュー(docs/roadmap.md v0.4)。
+    queue: Mutex<VecDeque<QueuedRun>>,
 }
 
 impl AppState {
@@ -356,7 +368,22 @@ fn open_output_folder(state: State<AppState>, agent_id: String) -> Result<(), St
 }
 
 #[tauri::command]
-fn start_task(app: tauri::AppHandle, state: State<AppState>, agent_id: String, prompt: String) -> Result<(), String> {
+fn start_task(app: tauri::AppHandle, agent_id: String, prompt: String) -> Result<(), String> {
+    spawn_task(app, agent_id, prompt, "manual", false)
+}
+
+/// 手動実行(start_task)とスケジュール実行(スケジューラループ)の共通処理
+/// (docs/roadmap.md v0.4)。エージェント定義解決 → TaskSpec 構築 → 実行の spawn まで行う。
+/// trigger は履歴の trigger 欄("manual"/"scheduled")、unattended は無人実行フラグ
+/// (true なら Ask になった権限要求を即座に拒否する。docs/architecture.md §7.1)。
+fn spawn_task(
+    app: tauri::AppHandle,
+    agent_id: String,
+    prompt: String,
+    trigger: &'static str,
+    unattended: bool,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
     {
         let running = state.running.lock().unwrap();
         let running_count = if running.is_some() { 1 } else { 0 };
@@ -428,6 +455,7 @@ fn start_task(app: tauri::AppHandle, state: State<AppState>, agent_id: String, p
         session_model: cfg.default_model.clone(),
         rules,
         bridge: state.bridge.clone(),
+        unattended,
     };
 
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
@@ -472,10 +500,11 @@ fn start_task(app: tauri::AppHandle, state: State<AppState>, agent_id: String, p
                 );
                 // タスク自体は(成功/失敗/中断のいずれでも)終わっているため、追記に失敗しても
                 // TaskFailed イベントは出さず eprintln に留める(UI にはもう出しようがない)。
-                let entry = history::entry_from_outcome(&agent_id, &prompt_for_history, &outcome);
+                let entry = history::entry_from_outcome(&agent_id, &prompt_for_history, &outcome, trigger);
                 if let Err(e) = history::append(&data_dir, &entry) {
                     eprintln!("履歴の追記に失敗しました: {e}");
                 }
+                notify_task_result(&app_handle, &agent_id, &outcome);
             }
             // TaskStarted 前(セッション起動失敗等)の失敗。履歴の主キーである session_id が
             // 無いため履歴対象外(copilot::run_task のコメント参照)。
@@ -488,6 +517,115 @@ fn start_task(app: tauri::AppHandle, state: State<AppState>, agent_id: String, p
     });
 
     Ok(())
+}
+
+/// タスク終了時の Windows トースト通知(docs/roadmap.md v0.4)。ベストエフォート:
+/// 送信に失敗してもタスクの結果自体には影響させない(eprintln のみ)。中断は通知しない
+/// (指示どおりの動作であり、失敗として騒ぐ必要が無いため)。
+fn notify_task_result(app: &tauri::AppHandle, agent_id: &str, outcome: &copilot::RunOutcome) {
+    use tauri_plugin_notification::NotificationExt;
+    let body = match outcome.status {
+        copilot::TaskStatus::Completed => format!("{agent_id} のタスクが完了しました"),
+        copilot::TaskStatus::Failed => format!("失敗しました: {}", outcome.summary),
+        copilot::TaskStatus::Cancelled => return,
+    };
+    if let Err(e) = app.notification().builder().title("agent-deck").body(body).show() {
+        eprintln!("通知の送信に失敗しました: {e}");
+    }
+}
+
+/// スケジューラのポーリング間隔(docs/roadmap.md v0.4)。アプリ(ウィンドウ)起動中のみ動作する。
+const SCHEDULER_TICK: Duration = Duration::from_secs(30);
+
+/// setup フックから spawn するスケジューラループ本体。
+async fn scheduler_loop(app: tauri::AppHandle) {
+    loop {
+        tokio::time::sleep(SCHEDULER_TICK).await;
+        if let Err(e) = scheduler_tick(&app) {
+            eprintln!("スケジューラの処理に失敗しました: {e}");
+        }
+    }
+}
+
+/// スケジューラ1回分の処理: (1) 発火判定 → キュー投入 → last_run_at 書き戻し、
+/// (2) 実行中でなければキュー先頭を1件実行する(docs/roadmap.md v0.4: 直列消化)。
+fn scheduler_tick(app: &tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let data_dir = state.data_dir()?.clone();
+
+    let mut file = schedule::load(&data_dir)?;
+    let now = chrono::Local::now();
+    let mut due_runs = Vec::new();
+    for sch in file.schedules.iter_mut() {
+        match schedule::is_due(sch, now) {
+            Ok(true) => {
+                due_runs.push(QueuedRun { agent_id: sch.agent_id.clone(), prompt: sch.prompt.clone() });
+                sch.last_run_at = Some(now.to_rfc3339());
+            }
+            Ok(false) => {}
+            Err(e) => eprintln!("スケジュール {} の発火判定に失敗しました: {e}", sch.id),
+        }
+    }
+    if !due_runs.is_empty() {
+        schedule::save(&data_dir, &file)?;
+        state.queue.lock().unwrap().extend(due_runs);
+    }
+
+    let should_try = state.running.lock().unwrap().is_none() && !state.queue.lock().unwrap().is_empty();
+    if should_try {
+        let run = state.queue.lock().unwrap().pop_front();
+        if let Some(run) = run {
+            if let Err(e) = spawn_task(app.clone(), run.agent_id.clone(), run.prompt.clone(), "scheduled", true) {
+                // 手動実行との競合など。キューの先頭へ戻して次回 tick で再試行する
+                // (再試行禁止の対象はタスクの失敗であり、開始そのものの取りこぼし防止は別問題)。
+                state.queue.lock().unwrap().push_front(run);
+                eprintln!("スケジュール実行を開始できませんでした(次回再試行): {e}");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn list_schedules(state: State<AppState>) -> Result<Vec<schedule::Schedule>, String> {
+    let data_dir = state.data_dir()?;
+    Ok(schedule::load(data_dir)?.schedules)
+}
+
+/// 新規・既存を id で判別して upsert する(id はフロントが新規作成時に発行する)。
+#[tauri::command]
+fn save_schedule(state: State<AppState>, schedule: schedule::Schedule) -> Result<(), String> {
+    let data_dir = state.data_dir()?;
+    let mut file = schedule::load(data_dir)?;
+    match file.schedules.iter_mut().find(|s| s.id == schedule.id) {
+        Some(existing) => *existing = schedule,
+        None => file.schedules.push(schedule),
+    }
+    schedule::save(data_dir, &file)
+}
+
+#[tauri::command]
+fn delete_schedule(state: State<AppState>, id: String) -> Result<(), String> {
+    let data_dir = state.data_dir()?;
+    let mut file = schedule::load(data_dir)?;
+    let before = file.schedules.len();
+    file.schedules.retain(|s| s.id != id);
+    if file.schedules.len() == before {
+        return Err(format!("スケジュールが見つかりません: {id}"));
+    }
+    schedule::save(data_dir, &file)
+}
+
+/// 実行ビュー付近の「待機中のスケジュール実行: n 件」表示用(docs/roadmap.md v0.4)。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QueueStatusDto {
+    queued: usize,
+}
+
+#[tauri::command]
+fn get_queue_status(state: State<AppState>) -> QueueStatusDto {
+    QueueStatusDto { queued: state.queue.lock().unwrap().len() }
 }
 
 #[tauri::command]
@@ -520,10 +658,19 @@ fn main() {
     tauri::Builder::default()
         // フォルダ選択ダイアログ用(docs/requirements.md §3.4)。
         .plugin(tauri_plugin_dialog::init())
+        // 完了・失敗のトースト通知用(docs/roadmap.md v0.4)。
+        .plugin(tauri_plugin_notification::init())
         .manage(AppState {
             data_dir: config::data_dir(),
             running: Mutex::new(None),
             bridge: copilot::PermissionBridge::new(),
+            queue: Mutex::new(VecDeque::new()),
+        })
+        .setup(|app| {
+            // スケジューラはアプリ(ウィンドウ)起動中のみ動作する(docs/roadmap.md v0.4: 常駐は未決のため実装しない)。
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(scheduler_loop(handle));
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             list_agents,
@@ -545,6 +692,10 @@ fn main() {
             start_task,
             cancel_task,
             respond_permission,
+            list_schedules,
+            save_schedule,
+            delete_schedule,
+            get_queue_status,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri の起動に失敗しました");
