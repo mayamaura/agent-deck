@@ -31,6 +31,11 @@ mod permissions;
 #[path = "../copilot.rs"]
 #[allow(dead_code)]
 mod copilot;
+// copilot.rs が use crate::audit(監査ログ。docs/roadmap.md v0.6)を要求するため共有する。
+// このバイナリでは監査ログの中身までは検証しないため allow(dead_code)。
+#[path = "../audit.rs"]
+#[allow(dead_code)]
+mod audit;
 
 use config::AgentSettings;
 use events::AppEvent;
@@ -117,6 +122,8 @@ async fn run_task_and_collect(
     auto_approve: bool,
 ) -> RoundOutcome {
     let bridge = copilot::PermissionBridge::new();
+    let logs_dir = std::env::temp_dir().join(format!("agent-deck-step4-logs-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&logs_dir);
     let spec = copilot::TaskSpec {
         prompt: prompt.to_string(),
         agent_id: "writer".to_string(),
@@ -127,6 +134,7 @@ async fn run_task_and_collect(
         rules,
         bridge: bridge.clone(),
         unattended: false,
+        logs_dir,
     };
     let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();

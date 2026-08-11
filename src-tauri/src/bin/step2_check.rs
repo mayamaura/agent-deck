@@ -23,6 +23,11 @@ mod permissions;
 #[path = "../copilot.rs"]
 #[allow(dead_code)]
 mod copilot;
+// copilot.rs が use crate::audit(監査ログ。docs/roadmap.md v0.6)を要求するため共有する。
+// このバイナリでは監査ログの中身までは検証しないため allow(dead_code)。
+#[path = "../audit.rs"]
+#[allow(dead_code)]
+mod audit;
 
 use events::AppEvent;
 use std::path::PathBuf;
@@ -51,6 +56,13 @@ async fn main() {
         let _ = tx.send(ev);
     };
 
+    // 監査ログの置き場(docs/roadmap.md v0.6)。このバイナリでは中身までは検証しない。
+    let logs_dir = std::env::temp_dir().join(format!("agent-deck-step2-logs-{}", std::process::id()));
+    if let Err(e) = std::fs::create_dir_all(&logs_dir) {
+        eprintln!("ログフォルダを作成できません({}): {e}", logs_dir.display());
+        std::process::exit(1);
+    }
+
     // ステップ2はイベント可視化の確認が目的でカスタムエージェントの検証はステップ3の
     // step3_check.rs 側で行うため、ここでは最小構成のダミーエージェント1件だけを渡す。
     let spec = copilot::TaskSpec {
@@ -70,6 +82,7 @@ async fn main() {
         rules: config::AgentSettings::default(),
         bridge: copilot::PermissionBridge::new(),
         unattended: false,
+        logs_dir,
     };
     let run = tokio::spawn(copilot::run_task(cli_path, spec, cancel_rx, sink));
 

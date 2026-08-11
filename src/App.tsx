@@ -304,6 +304,8 @@ export default function App() {
   const [queueStatus, setQueueStatus] = useState<QueueStatusDto | null>(null);
 
   const [outputFolderError, setOutputFolderError] = useState<string | null>(null);
+  // 監査ログフォルダを開くボタンのエラー表示用(docs/roadmap.md v0.6)。
+  const [logsFolderError, setLogsFolderError] = useState<string | null>(null);
   // 経過時間表示の現在時刻(1秒毎に更新。全セッション共通)。
   const [nowTick, setNowTick] = useState(() => Date.now());
 
@@ -731,6 +733,16 @@ export default function App() {
     }
   }
 
+  /** 監査ログフォルダ(data/logs/)を開く(docs/roadmap.md v0.6)。エージェント非依存。 */
+  async function handleOpenLogsFolder() {
+    setLogsFolderError(null);
+    try {
+      await invoke("open_logs_folder");
+    } catch (e) {
+      setLogsFolderError(String(e));
+    }
+  }
+
   /** 選択中タブ(activeSessionId)の respondedRequestIds に requestId を積む。 */
   async function respondPermission(requestId: string, decision: boolean) {
     if (!activeSessionId) return;
@@ -946,6 +958,12 @@ export default function App() {
               </button>
             </div>
             {saveStatus && <p className="muted">{saveStatus}</p>}
+          </div>
+        )}
+        {appConfig && appConfig.forcedDeniedTools.length > 0 && (
+          <div className="shared-settings">
+            <h3>管理者ポリシー</h3>
+            <p className="muted">管理者ポリシーで拒否: {appConfig.forcedDeniedTools.join(", ")}(変更不可)</p>
           </div>
         )}
         <div className="shared-settings">
@@ -1278,6 +1296,12 @@ export default function App() {
           </div>
         )}
         {outputFolderError && <p className="error">⚠ {outputFolderError}</p>}
+        <div className="run-controls">
+          <button type="button" onClick={handleOpenLogsFolder}>
+            監査ログフォルダを開く
+          </button>
+        </div>
+        {logsFolderError && <p className="error">⚠ {logsFolderError}</p>}
         <h3>ログ({activeSession ? sessionSummary(activeSession.events.map((e) => e.event)).agentId : "—"})</h3>
         <ul className="event-log">
           {(activeSession?.events ?? []).map((e, i) => (

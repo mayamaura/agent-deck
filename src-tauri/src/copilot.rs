@@ -5,6 +5,7 @@
 // 確認したもの(github-copilot-sdk-1.0.9/src/generated/session_events.rs)。sdk-notes.md に
 // 「未観測」とあった tool.* / subagent.* もこのソース読みで確認済み。
 
+use crate::audit;
 use crate::events::AppEvent;
 use crate::permissions;
 use github_copilot_sdk::handler::{PermissionHandler, PermissionResult};
@@ -74,6 +75,9 @@ pub struct TaskSpec {
     /// 権限要求は PermissionRequested を emit せず即座に拒否して実行全体を中断する
     /// (無人実行と承認ダイアログは両立しないため)。
     pub unattended: bool,
+    /// 監査ログ(data/logs/)の置き場(docs/roadmap.md v0.6)。AuditWriter の生成に使う。
+    /// ディレクトリの存在確認・作成は呼び出し側(main.rs)の責務。
+    pub logs_dir: PathBuf,
 }
 
 /// UI からの承認応答を届けるブリッジ。main.rs の respond_permission コマンドと共有する
@@ -152,6 +156,17 @@ fn build_permission_input(data: &PermissionRequestData) -> permissions::Permissi
         None
     };
 
+    // read_path も write_path と同じ理由で kind を read に限定する(docs/roadmap.md v0.6:
+    // 来歴 provenance.inputFiles 用。write との混同防止は write_path 側のコメント参照)。
+    let read_path = if matches!(data.kind, Some(PermissionRequestKind::Read)) {
+        permission_request
+            .and_then(|pr| pr.get("path"))
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+    } else {
+        None
+    };
+
     let detail = permission_request
         .and_then(|pr| {
             pr.get("fullCommandText")
@@ -166,7 +181,7 @@ fn build_permission_input(data: &PermissionRequestData) -> permissions::Permissi
         .and_then(|v| v.as_str())
         .map(str::to_string);
 
-    permissions::PermissionInput { tool_name, detail, write_path }
+    permissions::PermissionInput { tool_name, detail, write_path, read_path }
 }
 
 fn permission_kind_str(kind: Option<PermissionRequestKind>) -> String {
@@ -204,8 +219,27 @@ struct UiPermissionHandler {
     /// run_task が作成し、EventContext とも同じ Arc を共有する(RunOutcome.output_files /
     /// TaskCompleted.output_files に同じ一覧を使うため。docs/development.md ステップ6)。
     output_files: Arc<std::sync::Mutex<Vec<PathBuf>>>,
+    /// 承認された読み込み対象の絶対パスを集める共有コレクタ(docs/roadmap.md v0.6:
+    /// 来歴 provenance.inputFiles 用。output_files と同じ仕組み)。
+    input_files: Arc<std::sync::Mutex<Vec<PathBuf>>>,
     /// 無人実行フラグ(docs/roadmap.md v0.4)。TaskSpec.unattended をそのまま持つ。
     unattended: bool,
+    /// 監査ログ(docs/roadmap.md v0.6)。全ての権限判定経路(Deny/Approve/Ask のいずれも)を
+    /// record_permission で記録する(自動承認・自動拒否は AppEvent に出ないため、ここが唯一の記録経路)。
+    audit: Arc<audit::AuditWriter>,
+}
+
+/// PermissionInput から PermissionAudit を組み立てる(docs/roadmap.md v0.6)。
+/// UiPermissionHandler::handle の 5 判定経路(autoDenied/autoApproved/unattendedDenied/
+/// userApproved/userDenied)で共通して使う。
+fn permission_audit(input: &permissions::PermissionInput, decision: &str) -> audit::PermissionAudit {
+    audit::PermissionAudit {
+        timestamp: format_rfc3339_now(),
+        decision: decision.to_string(),
+        tool_name: input.tool_name.clone(),
+        detail: input.detail.clone(),
+        write_path: input.write_path.as_ref().map(|p| p.display().to_string()),
+    }
 }
 
 impl PermissionHandler for UiPermissionHandler {
@@ -220,9 +254,10 @@ impl PermissionHandler for UiPermissionHandler {
         Self: 'async_trait,
     {
         Box::pin(async move {
+            let session_id_str = session_id.to_string();
             // 観測用: extra の実形を記録する(docs/sdk-notes.md「形は CLI バージョン依存」)。
             eprintln!(
-                "[permission] session={session_id} request={request_id} extra={}",
+                "[permission] session={session_id_str} request={request_id} extra={}",
                 serde_json::to_string(&data.extra).unwrap_or_else(|_| "<invalid json>".to_string())
             );
 
@@ -230,12 +265,17 @@ impl PermissionHandler for UiPermissionHandler {
 
             match permissions::decide(&self.rules, &input) {
                 permissions::Decision::Deny => {
+                    self.audit.record_permission(&session_id_str, &permission_audit(&input, "autoDenied"));
                     PermissionResult::reject("agents.json の deniedTools により拒否".to_string())
                 }
                 permissions::Decision::Approve => {
                     if let Some(path) = &input.write_path {
                         self.output_files.lock().unwrap().push(path.clone());
                     }
+                    if let Some(path) = &input.read_path {
+                        self.input_files.lock().unwrap().push(path.clone());
+                    }
+                    self.audit.record_permission(&session_id_str, &permission_audit(&input, "autoApproved"));
                     PermissionResult::approve_once()
                 }
                 permissions::Decision::Ask => {
@@ -247,31 +287,42 @@ impl PermissionHandler for UiPermissionHandler {
                         // 無人実行と承認ダイアログは両立しない(docs/roadmap.md v0.4)。
                         // PermissionRequested は emit せず即座に拒否し、実行全体を中断する。
                         let reason = format!("無人実行のため、事前承認されていない操作を拒否しました: {detail}");
+                        self.audit.record_permission(&session_id_str, &permission_audit(&input, "unattendedDenied"));
                         let _ = self.abort_tx.send(reason.clone());
                         return PermissionResult::reject(reason);
                     }
                     let request_id_str = request_id.to_string();
-                    (self.sink)(AppEvent::PermissionRequested {
-                        session_id: session_id.to_string(),
+                    let permission_event = AppEvent::PermissionRequested {
+                        session_id: session_id_str.clone(),
                         request_id: request_id_str.clone(),
                         permission_kind: input.tool_name.clone(),
                         detail,
-                    });
+                    };
+                    // 監査ログは「全 AppEvent」が方針(docs/roadmap.md v0.6)。この後の
+                    // record_permission(userApproved/userDenied)は最終判定のみを記す別記録。
+                    self.audit.record_event(&session_id_str, &permission_event);
+                    (self.sink)(permission_event);
                     let rx = self.bridge.register(request_id_str);
                     match rx.await {
                         Ok(true) => {
                             if let Some(path) = &input.write_path {
                                 self.output_files.lock().unwrap().push(path.clone());
                             }
+                            if let Some(path) = &input.read_path {
+                                self.input_files.lock().unwrap().push(path.clone());
+                            }
+                            self.audit.record_permission(&session_id_str, &permission_audit(&input, "userApproved"));
                             PermissionResult::approve_once()
                         }
                         Ok(false) => {
                             // タスク全体を止める(拒否は個々のツール呼び出しだけでなく実行全体の中断)。
+                            self.audit.record_permission(&session_id_str, &permission_audit(&input, "userDenied"));
                             let _ = self.abort_tx.send("権限が拒否されたため実行を中断しました".to_string());
                             PermissionResult::reject("ユーザーが拒否しました".to_string())
                         }
                         Err(_) => {
                             // 応答が届く前に送信側が消えた(タスク終了等)。安全側に倒して拒否する。
+                            self.audit.record_permission(&session_id_str, &permission_audit(&input, "userDenied"));
                             PermissionResult::reject("応答を受信できなかったため拒否しました".to_string())
                         }
                     }
@@ -590,7 +641,7 @@ impl EventContext {
         vec![AppEvent::TaskCompleted {
             session_id: self.session_id.clone(),
             summary: self.last_main_message.clone(),
-            output_files: dedup_output_files(&self.output_files),
+            output_files: dedup_paths(&self.output_files),
         }]
     }
 
@@ -623,9 +674,9 @@ enum Outcome {
     Failed(String),
 }
 
-/// 承認された書き込み先パスの重複除去済み絶対パス文字列一覧
+/// 承認されたパス集合(書き込み先/読み込み対象とも)の重複除去済み絶対パス文字列一覧
 /// (UiPermissionHandler / EventContext が共有する Arc<Mutex<Vec<PathBuf>>> から作る)。
-fn dedup_output_files(files: &std::sync::Mutex<Vec<PathBuf>>) -> Vec<String> {
+fn dedup_paths(files: &std::sync::Mutex<Vec<PathBuf>>) -> Vec<String> {
     let mut list: Vec<String> = files.lock().unwrap().iter().map(|p| p.display().to_string()).collect();
     list.sort();
     list.dedup();
@@ -643,6 +694,8 @@ pub struct RunOutcome {
     pub summary: String,
     /// 承認された書き込み先の絶対パス(重複除去済み)。
     pub output_files: Vec<String>,
+    /// 承認された読み込み対象の絶対パス(重複除去済み。docs/roadmap.md v0.6: 来歴 provenance.inputFiles 用)。
+    pub input_files: Vec<String>,
     /// assistant.usage の input_tokens+output_tokens の総和(取れた分)。
     pub total_tokens: Option<u64>,
     pub subagents: Vec<SubagentOutcome>,
@@ -657,6 +710,18 @@ pub enum TaskStatus {
     Completed,
     Failed,
     Cancelled,
+}
+
+impl TaskStatus {
+    /// history::entry_from_outcome と同じ文字列表現(docs/roadmap.md v0.6: provenance.status
+    /// でも同じ表記を使うための共有ヘルパー。history.rs 側は変更不要のためそのまま残す)。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TaskStatus::Completed => "completed",
+            TaskStatus::Failed => "failed",
+            TaskStatus::Cancelled => "cancelled",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -704,13 +769,20 @@ pub async fn run_task(
     // 承認された書き込み先の共有コレクタ。UiPermissionHandler と EventContext の両方に
     // 同じ Arc を渡す(RunOutcome.output_files / TaskCompleted.output_files を一致させるため)。
     let output_files: Arc<std::sync::Mutex<Vec<PathBuf>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    // 承認された読み込み対象の共有コレクタ(docs/roadmap.md v0.6: 来歴 provenance.inputFiles 用)。
+    let input_files: Arc<std::sync::Mutex<Vec<PathBuf>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    // 監査ログ(docs/roadmap.md v0.6)。ファイル自体は session_id 判明後の初回書き込みで
+    // 遅延生成されるため、この時点(セッション作成前)で作ってよい。
+    let audit = Arc::new(audit::AuditWriter::new(&spec.logs_dir));
     let permission_handler = Arc::new(UiPermissionHandler {
         rules: spec.rules.clone(),
         bridge: bridge.clone(),
         sink: Arc::clone(&sink),
         abort_tx: deny_abort_tx,
         output_files: Arc::clone(&output_files),
+        input_files: Arc::clone(&input_files),
         unattended: spec.unattended,
+        audit: Arc::clone(&audit),
     });
 
     // rules.denied_tools のうち括弧を含まない単純名(例 "write")は SessionConfig の
@@ -747,11 +819,10 @@ pub async fn run_task(
     let started_at = format_rfc3339_now();
     // RunOutcome.duration_ms は「開始時刻からの所要」(docs/development.md ステップ6)。
     let task_start = Instant::now();
-    sink(AppEvent::TaskStarted {
-        session_id: session_id.clone(),
-        agent_id: spec.agent_id,
-        started_at: started_at.clone(),
-    });
+    let task_started_event =
+        AppEvent::TaskStarted { session_id: session_id.clone(), agent_id: spec.agent_id, started_at: started_at.clone() };
+    audit.record_event(&session_id, &task_started_event);
+    sink(task_started_event);
 
     let mut ctx = EventContext::new();
     ctx.session_id = session_id.clone();
@@ -803,6 +874,7 @@ pub async fn run_task(
                                     terminal_status = Some(status);
                                     terminal_summary = summary;
                                 }
+                                audit.record_event(&session_id, &app_event);
                                 sink(app_event);
                             }
                         }
@@ -822,6 +894,7 @@ pub async fn run_task(
                             terminal_status = Some(status);
                             terminal_summary = summary;
                         }
+                        audit.record_event(&session_id, &app_event);
                         sink(app_event);
                     }
                 }
@@ -849,7 +922,9 @@ pub async fn run_task(
             Outcome::Completed => (TaskStatus::Completed, ctx.last_main_message.clone()),
             Outcome::Failed(e) => {
                 if !terminal_sent {
-                    sink(AppEvent::TaskFailed { session_id: session_id.clone(), error: e.clone() });
+                    let ev = AppEvent::TaskFailed { session_id: session_id.clone(), error: e.clone() };
+                    audit.record_event(&session_id, &ev);
+                    sink(ev);
                 }
                 (TaskStatus::Failed, e.clone())
             }
@@ -860,7 +935,8 @@ pub async fn run_task(
         session_id,
         status,
         summary,
-        output_files: dedup_output_files(&output_files),
+        output_files: dedup_paths(&output_files),
+        input_files: dedup_paths(&input_files),
         total_tokens: ctx.total_tokens,
         subagents: ctx.subagent_outcomes,
         started_at,

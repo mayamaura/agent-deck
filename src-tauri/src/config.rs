@@ -26,10 +26,19 @@ pub struct AppConfig {
     /// 既存 config.json に無くても読めるよう serde default。
     #[serde(default = "default_max_concurrent_tasks")]
     pub max_concurrent_tasks: usize,
+    /// ログ(data/logs/ 配下の監査ログ・来歴)の保持日数(docs/roadmap.md v0.6、
+    /// docs/open-questions.md #5: 暫定既定90日)。0 は「無制限」。
+    /// 既存 config.json に無くても読めるよう serde default。
+    #[serde(default = "default_log_retention_days")]
+    pub log_retention_days: u32,
 }
 
 fn default_max_concurrent_tasks() -> usize {
     2
+}
+
+fn default_log_retention_days() -> u32 {
+    90
 }
 
 impl Default for AppConfig {
@@ -43,8 +52,46 @@ impl Default for AppConfig {
             shared_agents_source: None,
             update_source: None,
             max_concurrent_tasks: default_max_concurrent_tasks(),
+            log_retention_days: default_log_retention_days(),
         }
     }
+}
+
+/// data/policy.json — 管理者ポリシー(docs/roadmap.md v0.6)。ユーザーは設定画面から変更
+/// できない(強制拒否ツールの一覧のみ)。ファイルが無ければ None(全機能そのまま)。
+/// 「管理者」ロール概念は導入しない。このファイルの有無だけで制御する(roadmap.md 禁止事項)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Policy {
+    pub version: u32,
+    #[serde(default)]
+    pub forced_denied_tools: Vec<String>,
+}
+
+/// ファイルが無ければ Ok(None)(全機能そのまま)。壊れていたら握りつぶさずエラーにする
+/// (docs/development.md §3)。呼び出し側(main.rs)はこれを起動時の設定取得経路で読むため、
+/// エラーはそのまま UI まで届く。
+pub fn load_policy(data_dir: &Path) -> Result<Option<Policy>, String> {
+    let path = data_dir.join("policy.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&path).map_err(|e| format!("{} を読めません: {e}", path.display()))?;
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|e| format!("{} の形式が不正です: {e}", path.display()))
+}
+
+/// agents.json 側の denied_tools に policy.json の forcedDeniedTools をマージする(重複除去)。
+/// spawn_task が実行直前に適用する(docs/roadmap.md v0.6)。UI からは変更できない一覧を
+/// 上乗せするだけの純関数にして、main.rs 抜きでもユニットテストできるようにする。
+pub fn merge_forced_denied_tools(mut denied: Vec<String>, forced: &[String]) -> Vec<String> {
+    for tool in forced {
+        if !denied.contains(tool) {
+            denied.push(tool.clone());
+        }
+    }
+    denied
 }
 
 /// data/agents.json — エージェントごとの運用設定(docs/architecture.md §6.3)。
@@ -194,5 +241,56 @@ mod tests {
         fs::write(dir.join("agents.json"), "{ こわれてる").unwrap();
         assert!(load_agents_config(&dir).is_err());
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// docs/roadmap.md v0.6: policy.json が無ければ全機能そのまま(Ok(None))。
+    #[test]
+    fn load_policy_missing_file_is_none() {
+        let dir = std::env::temp_dir().join("agent_deck_test_config_policy_missing");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        assert!(load_policy(&dir).unwrap().is_none());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 壊れた policy.json は握りつぶさずエラーになる(docs/development.md §3)。
+    #[test]
+    fn load_policy_broken_json_is_an_error() {
+        let dir = std::env::temp_dir().join("agent_deck_test_config_policy_broken");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("policy.json"), "{ こわれてる").unwrap();
+        assert!(load_policy(&dir).is_err());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_policy_reads_forced_denied_tools() {
+        let dir = std::env::temp_dir().join("agent_deck_test_config_policy_ok");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("policy.json"), r#"{"version":1,"forcedDeniedTools":["shell(rm)"]}"#).unwrap();
+        let policy = load_policy(&dir).unwrap().expect("policy should be present");
+        assert_eq!(policy.forced_denied_tools, vec!["shell(rm)".to_string()]);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// マージは重複を除去しつつ、forcedDeniedTools 側の新規項目だけ追加する。
+    #[test]
+    fn merge_forced_denied_tools_dedupes() {
+        let denied = vec!["custom".to_string(), "shell(rm)".to_string()];
+        let forced = vec!["shell(rm)".to_string(), "shell(format)".to_string()];
+        let merged = merge_forced_denied_tools(denied, &forced);
+        assert_eq!(
+            merged,
+            vec!["custom".to_string(), "shell(rm)".to_string(), "shell(format)".to_string()]
+        );
+    }
+
+    #[test]
+    fn merge_forced_denied_tools_with_no_policy_is_passthrough() {
+        let denied = vec!["shell(rm)".to_string()];
+        let merged = merge_forced_denied_tools(denied.clone(), &[]);
+        assert_eq!(merged, denied);
     }
 }

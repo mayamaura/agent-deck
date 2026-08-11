@@ -32,6 +32,11 @@ mod permissions;
 #[path = "../copilot.rs"]
 #[allow(dead_code)]
 mod copilot;
+// copilot.rs が use crate::audit(監査ログ。docs/roadmap.md v0.6)を要求するため共有する。
+// このバイナリでは監査ログの中身までは検証しないため allow(dead_code)。
+#[path = "../audit.rs"]
+#[allow(dead_code)]
+mod audit;
 
 use events::AppEvent;
 use std::path::PathBuf;
@@ -108,6 +113,8 @@ async fn main() {
 /// ラウンド1: 通常完了(TaskStarted.agent_id == "greeter" / TaskCompleted を受信)。
 async fn run_round1(cli_path: &PathBuf, greeter: &agents::AgentDefinition, agent_specs: &[copilot::AgentSpec]) -> bool {
     println!("=== ラウンド1: 通常完了 ===");
+    let logs_dir = std::env::temp_dir().join(format!("agent-deck-step3-logs-{}-r1", std::process::id()));
+    let _ = std::fs::create_dir_all(&logs_dir);
     let spec = copilot::TaskSpec {
         prompt: "こんにちはとだけ返してください".to_string(),
         agent_id: "greeter".to_string(),
@@ -118,6 +125,7 @@ async fn run_round1(cli_path: &PathBuf, greeter: &agents::AgentDefinition, agent
         rules: config::AgentSettings::default(),
         bridge: copilot::PermissionBridge::new(),
         unattended: false,
+        logs_dir,
     };
     let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
@@ -161,6 +169,8 @@ async fn run_round1(cli_path: &PathBuf, greeter: &agents::AgentDefinition, agent
 /// TaskCancelled を受信できれば OK。TaskCompleted で終わった場合は中断が機能していないので失敗。
 async fn run_round2(cli_path: PathBuf, greeter: &agents::AgentDefinition, agent_specs: Vec<copilot::AgentSpec>) -> bool {
     println!("=== ラウンド2: 中断 ===");
+    let logs_dir = std::env::temp_dir().join(format!("agent-deck-step3-logs-{}-r2", std::process::id()));
+    let _ = std::fs::create_dir_all(&logs_dir);
     let spec = copilot::TaskSpec {
         prompt: "1から100までゆっくり数えて".to_string(),
         agent_id: "greeter".to_string(),
@@ -171,6 +181,7 @@ async fn run_round2(cli_path: PathBuf, greeter: &agents::AgentDefinition, agent_
         rules: config::AgentSettings::default(),
         bridge: copilot::PermissionBridge::new(),
         unattended: false,
+        logs_dir,
     };
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();

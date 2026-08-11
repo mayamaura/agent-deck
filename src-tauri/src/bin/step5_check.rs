@@ -28,6 +28,11 @@ mod permissions;
 #[path = "../copilot.rs"]
 #[allow(dead_code)]
 mod copilot;
+// copilot.rs が use crate::audit(監査ログ。docs/roadmap.md v0.6)を要求するため共有する。
+// このバイナリでは監査ログの中身までは検証しないため allow(dead_code)。
+#[path = "../audit.rs"]
+#[allow(dead_code)]
+mod audit;
 
 use events::AppEvent;
 use std::path::PathBuf;
@@ -100,6 +105,11 @@ async fn main() {
         })
         .collect();
 
+    let logs_dir = agent_dir.join("logs");
+    if let Err(e) = std::fs::create_dir_all(&logs_dir) {
+        eprintln!("ログフォルダを作成できません({}): {e}", logs_dir.display());
+        std::process::exit(1);
+    }
     let spec = copilot::TaskSpec {
         prompt: "helper に短い挨拶文を作ってもらい、その結果をそのまま報告してください".to_string(),
         agent_id: "coordinator".to_string(),
@@ -110,6 +120,7 @@ async fn main() {
         rules: config::AgentSettings::default(),
         bridge: copilot::PermissionBridge::new(),
         unattended: false,
+        logs_dir,
     };
 
     let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();

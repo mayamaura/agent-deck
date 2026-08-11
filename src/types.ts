@@ -43,6 +43,9 @@ export interface AppConfigDto {
   defaultModel: string | null;
   updateSource: string | null;
   currentVersion: string;
+  // 管理者ポリシー(data/policy.json)の forcedDeniedTools(docs/roadmap.md v0.6)。
+  // 空配列なら UI 側で非表示にする。設定画面からは変更できない(表示のみ)。
+  forcedDeniedTools: string[];
 }
 
 // src-tauri/src/main.rs UpdateInfoDto(check_for_updates の戻り値)

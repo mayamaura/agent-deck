@@ -34,6 +34,11 @@ mod config;
 mod permissions;
 #[path = "../copilot.rs"]
 mod copilot;
+// copilot.rs が use crate::audit(監査ログ。docs/roadmap.md v0.6)を要求するため共有する。
+// このバイナリでは監査ログの中身までは検証しないため allow(dead_code)。
+#[path = "../audit.rs"]
+#[allow(dead_code)]
+mod audit;
 
 use events::AppEvent;
 use std::path::PathBuf;
@@ -126,6 +131,9 @@ struct RunResult {
 /// 想定外だが、想定外に届いてもハングしないよう安全側(拒否)で応答する。
 async fn run_and_collect(cli_path: &PathBuf, ws: &PathBuf, agent: copilot::AgentSpec, prompt: &str) -> RunResult {
     let bridge = copilot::PermissionBridge::new();
+    // ws は呼び出し側(a/b)で既に別ディレクトリなので、logs もそれぞれ別になる。
+    let logs_dir = ws.join("logs");
+    let _ = std::fs::create_dir_all(&logs_dir);
     let spec = copilot::TaskSpec {
         prompt: prompt.to_string(),
         agent_id: agent.name.clone(),
@@ -136,6 +144,7 @@ async fn run_and_collect(cli_path: &PathBuf, ws: &PathBuf, agent: copilot::Agent
         rules: config::AgentSettings::default(),
         bridge: bridge.clone(),
         unattended: false,
+        logs_dir,
     };
     let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
@@ -208,8 +217,12 @@ fn check_results(name_a: &str, a: RunResult, name_b: &str, b: RunResult) -> bool
             ok = false;
         }
         println!(
-            "{label}: summary={:?} total_tokens={:?} output_files={:?}",
-            outcome.summary, outcome.total_tokens, outcome.output_files
+            "{label}: summary={:?} total_tokens={:?} output_files={:?} input_files={:?} status={}",
+            outcome.summary,
+            outcome.total_tokens,
+            outcome.output_files,
+            outcome.input_files,
+            outcome.status.as_str()
         );
         for sub in &outcome.subagents {
             println!("{label} subagent: {} ({}ms)", sub.name, sub.duration_ms);

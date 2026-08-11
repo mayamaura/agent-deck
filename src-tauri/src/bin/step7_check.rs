@@ -32,6 +32,11 @@ mod config;
 mod permissions;
 #[path = "../copilot.rs"]
 mod copilot;
+// copilot.rs が use crate::audit(監査ログ。docs/roadmap.md v0.6)を要求するため共有する。
+// このバイナリでは監査ログの中身までは検証しないため allow(dead_code)。
+#[path = "../audit.rs"]
+#[allow(dead_code)]
+mod audit;
 #[path = "../history.rs"]
 mod history;
 #[path = "../schedule.rs"]
@@ -129,6 +134,8 @@ async fn run_task_and_collect(
     unattended: bool,
 ) -> RoundOutcome {
     let bridge = copilot::PermissionBridge::new();
+    let logs_dir = std::env::temp_dir().join(format!("agent-deck-step7-logs-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&logs_dir);
     let spec = copilot::TaskSpec {
         prompt: prompt.to_string(),
         agent_id: agent.name.clone(),
@@ -139,6 +146,7 @@ async fn run_task_and_collect(
         rules,
         bridge: bridge.clone(),
         unattended,
+        logs_dir,
     };
     let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
@@ -282,6 +290,11 @@ async fn run_round_a(cli_path: &PathBuf, greeter_spec: &copilot::AgentSpec, data
     }
     if ok {
         println!("ラウンドA OK: summary={:?}", run_outcome.summary);
+        println!(
+            "ラウンドA OK: status.as_str()={} input_files={:?}",
+            run_outcome.status.as_str(),
+            run_outcome.input_files
+        );
         println!("ラウンドA OK: history={}", serde_json::to_string(first).unwrap_or_default());
     }
     ok

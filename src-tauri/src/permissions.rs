@@ -25,6 +25,10 @@ pub struct PermissionInput {
     pub detail: Option<String>,
     /// 書き込み系ツールの場合の書き込み先
     pub write_path: Option<PathBuf>,
+    /// read ツールの場合の読み込み対象(docs/roadmap.md v0.6: 来歴 provenance.inputFiles 用)。
+    /// write_path と同様、kind が read のときだけ埋める(ディレクトリ一覧の read も混ざるが、
+    /// そのまま列挙してよい仕様)。
+    pub read_path: Option<PathBuf>,
 }
 
 /// 判定ロジック(docs/architecture.md §7.1 の 1→4 の順)。
@@ -131,6 +135,7 @@ mod tests {
             tool_name: "write".into(),
             detail: None,
             write_path: Some(dir.join("report.md")),
+            read_path: None,
         };
         assert_eq!(decide(&s, &input), Decision::Approve);
     }
@@ -144,6 +149,7 @@ mod tests {
             tool_name: "write".into(),
             detail: None,
             write_path: Some(dir.join("..").join("escape.md")),
+            read_path: None,
         };
         assert_eq!(decide(&s, &input), Decision::Ask);
     }
@@ -157,6 +163,7 @@ mod tests {
             tool_name: "shell".into(),
             detail: Some("rm -rf report.md".into()),
             write_path: Some(dir.join("x")),
+            read_path: None,
         };
         assert_eq!(decide(&s, &input), Decision::Deny);
     }
@@ -170,52 +177,53 @@ mod tests {
             tool_name: "shell".into(),
             detail: Some("python script.py".into()),
             write_path: None,
+            read_path: None,
         };
         assert_eq!(decide(&s, &input), Decision::Ask);
     }
 
     #[test]
     fn pattern_name_only_matches_regardless_of_detail() {
-        let input = PermissionInput { tool_name: "write".into(), detail: Some("何でも".into()), write_path: None };
+        let input = PermissionInput { tool_name: "write".into(), detail: Some("何でも".into()), write_path: None, read_path: None };
         assert!(tool_matches("write", &input));
-        let input_no_detail = PermissionInput { tool_name: "write".into(), detail: None, write_path: None };
+        let input_no_detail = PermissionInput { tool_name: "write".into(), detail: None, write_path: None, read_path: None };
         assert!(tool_matches("write", &input_no_detail));
     }
 
     #[test]
     fn pattern_name_only_does_not_match_different_kind() {
-        let input = PermissionInput { tool_name: "read".into(), detail: None, write_path: None };
+        let input = PermissionInput { tool_name: "read".into(), detail: None, write_path: None, read_path: None };
         assert!(!tool_matches("write", &input));
     }
 
     #[test]
     fn shell_filter_without_wildcard_matches_first_token_exactly() {
-        let input = PermissionInput { tool_name: "shell".into(), detail: Some("rm -rf /tmp".into()), write_path: None };
+        let input = PermissionInput { tool_name: "shell".into(), detail: Some("rm -rf /tmp".into()), write_path: None, read_path: None };
         assert!(tool_matches("shell(rm)", &input));
 
-        let not_exact = PermissionInput { tool_name: "shell".into(), detail: Some("rmdir /tmp".into()), write_path: None };
+        let not_exact = PermissionInput { tool_name: "shell".into(), detail: Some("rmdir /tmp".into()), write_path: None, read_path: None };
         assert!(!tool_matches("shell(rm)", &not_exact), "先頭トークンの完全一致でなければマッチしない");
     }
 
     #[test]
     fn shell_wildcard_filter_matches_command_prefix() {
-        let input = PermissionInput { tool_name: "shell".into(), detail: Some("python script.py".into()), write_path: None };
+        let input = PermissionInput { tool_name: "shell".into(), detail: Some("python script.py".into()), write_path: None, read_path: None };
         assert!(tool_matches("shell(python:*)", &input));
 
-        let other = PermissionInput { tool_name: "shell".into(), detail: Some("node x.js".into()), write_path: None };
+        let other = PermissionInput { tool_name: "shell".into(), detail: Some("node x.js".into()), write_path: None, read_path: None };
         assert!(!tool_matches("shell(python:*)", &other));
     }
 
     #[test]
     fn wildcard_filter_is_rejected_for_non_shell_names() {
         // CLI 仕様上ワイルドカードは shell 専用。write(python:*) のような組み合わせは常に不一致。
-        let input = PermissionInput { tool_name: "write".into(), detail: Some("python:* script.py".into()), write_path: None };
+        let input = PermissionInput { tool_name: "write".into(), detail: Some("python:* script.py".into()), write_path: None, read_path: None };
         assert!(!tool_matches("write(python:*)", &input));
     }
 
     #[test]
     fn different_tool_kind_never_matches_even_with_matching_filter_text() {
-        let input = PermissionInput { tool_name: "read".into(), detail: Some("rm".into()), write_path: None };
+        let input = PermissionInput { tool_name: "read".into(), detail: Some("rm".into()), write_path: None, read_path: None };
         assert!(!tool_matches("shell(rm)", &input));
     }
 }

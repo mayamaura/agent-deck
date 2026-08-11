@@ -11,7 +11,7 @@
 | 8 | 更新・定義同期の配布元 | 共有フォルダ方式で実装済み(update_source / sharedAgentsSource)。GitHub 方式は保留 | private リポジトリの PAT 配布問題(roadmap v0.3) |
 | 3 | モデルの指定方法(エージェント定義側か、アプリ設定側か) | **暫定運用で実装済み**: エージェント定義の `model` > アプリの `defaultModel` > SDK 既定(SDK の CustomAgentConfig の仕様上この優先順が自然なため)。正式決定は保留 | 両方技術的に可能。競合時の優先順位は公式に記載なし |
 | 4 | 実行中のセッション数の上限 | **暫定運用で実装済み(v0.5)**: config.json の `maxConcurrentTasks`(既定 2)。正式な上限値は運用を見て決定 | Copilot のレート・クレジット消費は並行数に比例(roadmap: 小さく始める) |
-| 5 | ログの保持期間 | 無制限(未実装) | 無制限だと data/logs/ が肥大する。世代数か日数での上限が候補 |
+| 5 | ログの保持期間 | **暫定運用で実装(v0.6)**: config.json の `logRetentionDays`(既定 90、0=無制限)。起動時に data/logs/ の古いファイルを削除。history.jsonl は対象外(小さいため無期限)。正式値は運用を見て決定 | 無制限だと data/logs/ が肥大する |
 
 (#1 名称、#2 フロントエンド、#6 CLI ポリシーは解決済み → 決定ログ)
 

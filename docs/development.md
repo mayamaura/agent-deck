@@ -58,7 +58,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin smoke
 - [x] v0.3 更新の検知と通知(マニフェスト + sha256 検証)— tag v0.3.0
 - [x] v0.4 定期実行と通知(スケジューラはアプリ起動中のみ・無人実行は Ask 即拒否・トースト通知)— tag v0.4.0
 - [x] v0.5 並行実行とダッシュボード(上限は maxConcurrentTasks 既定 2、同一出力フォルダは排他)— tag v0.5.0
-- [ ] v0.6 監査とガバナンス
+- [x] v0.6 監査とガバナンス(監査ログ・来歴・policy.json・保持期間 90 日暫定)— tag v0.6.0
 - [ ] v1.0 安定版(運用確認はユーザー引継ぎ)
 
 ### v0.1 ステップ進捗

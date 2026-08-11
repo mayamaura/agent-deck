@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agents;
+mod audit;
 mod config;
 mod copilot;
 mod events;
@@ -96,6 +97,33 @@ fn output_dir_conflict(running: &[(String, Option<PathBuf>)], candidate: &Option
         }
     }
     None
+}
+
+/// provenance.agentVersion の計算(docs/roadmap.md v0.6): 共有定義は同期マニフェストの
+/// sha256 先頭8桁、個人定義はファイル内容の sha256 先頭8桁を、書き込み時点でその都度計算する
+/// (agents::AgentDefinition.version はスキャン時点のキャッシュのため使わない)。
+/// 読めない・見つからない場合はタスク結果自体には影響させず "(unknown)" で埋める。
+fn agent_version_for_provenance(data_dir: &Path, scope: agents::AgentScope, source_path: &Path) -> String {
+    const UNKNOWN: &str = "(unknown)";
+    match scope {
+        agents::AgentScope::Shared => {
+            let meta_path = config::shared_agents_meta_path(data_dir);
+            let Some(file_name) = source_path.file_name().and_then(|n| n.to_str()) else {
+                return UNKNOWN.to_string();
+            };
+            match sync::load_manifest(&meta_path) {
+                Ok(Some(manifest)) => manifest
+                    .files
+                    .get(file_name)
+                    .map(|e| e.sha256[..8].to_string())
+                    .unwrap_or_else(|| UNKNOWN.to_string()),
+                _ => UNKNOWN.to_string(),
+            }
+        }
+        agents::AgentScope::Personal => std::fs::read(source_path)
+            .map(|bytes| agents::sha256_hex(&bytes)[..8].to_string())
+            .unwrap_or_else(|_| UNKNOWN.to_string()),
+    }
 }
 
 /// frontmatter + 本文の .agent.md テキストを組み立てる(save/create_agent_definition 共通)。
@@ -280,17 +308,22 @@ struct AppConfigDto {
     update_source: Option<PathBuf>,
     /// 表示用の現行バージョン(docs/roadmap.md v0.3、UI に「agent-deck vX.Y.Z」を出す用途)。
     current_version: String,
+    /// 管理者ポリシー(data/policy.json)の forcedDeniedTools(docs/roadmap.md v0.6)。
+    /// 空なら UI 側で非表示にする。設定画面からは変更できない(表示のみ)。
+    forced_denied_tools: Vec<String>,
 }
 
 #[tauri::command]
 fn get_app_config(state: State<AppState>) -> Result<AppConfigDto, String> {
     let data_dir = state.data_dir()?;
     let cfg = config::load_app_config(data_dir)?;
+    let policy = config::load_policy(data_dir)?;
     Ok(AppConfigDto {
         shared_agents_source: cfg.shared_agents_source,
         default_model: cfg.default_model,
         update_source: cfg.update_source,
         current_version: env!("CARGO_PKG_VERSION").to_string(),
+        forced_denied_tools: policy.map(|p| p.forced_denied_tools).unwrap_or_default(),
     })
 }
 
@@ -387,6 +420,20 @@ fn open_output_folder(state: State<AppState>, agent_id: String) -> Result<(), St
     Ok(())
 }
 
+/// 監査ログフォルダ(data/logs/)をエクスプローラで開く(docs/roadmap.md v0.6)。
+/// エージェント非依存(セッション横断で全て data/logs/ 配下にあるため)。
+#[tauri::command]
+fn open_logs_folder(state: State<AppState>) -> Result<(), String> {
+    let data_dir = state.data_dir()?;
+    let dir = data_dir.join("logs");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{} を作成できません: {e}", dir.display()))?;
+    std::process::Command::new("explorer")
+        .arg(&dir)
+        .spawn()
+        .map_err(|e| format!("エクスプローラを起動できません: {e}"))?;
+    Ok(())
+}
+
 #[tauri::command]
 fn start_task(app: tauri::AppHandle, agent_id: String, prompt: String) -> Result<(), String> {
     spawn_task(app, agent_id, prompt, "manual", false)
@@ -409,6 +456,12 @@ fn spawn_task(
     let cfg = config::load_app_config(&data_dir)?;
     let cli_path = copilot::resolve_cli_path(cfg.copilot_cli_path.as_deref())?;
 
+    // 監査ログの置き場(docs/roadmap.md v0.6)。ファイル自体は copilot::run_task 側が
+    // セッションID判明後に遅延生成するが、ディレクトリそのものはここで用意する。
+    let logs_dir = data_dir.join("logs");
+    std::fs::create_dir_all(&logs_dir)
+        .map_err(|e| format!("{} を作成できません: {e}", logs_dir.display()))?;
+
     // エージェント定義を全件(個人+共有)読み、選択された agent_id に一致するものを探す。
     // 選択外の定義もセッションに渡す(SDK 側の自動委任の候補にするため。docs/sdk-notes.md「カスタムエージェント」節)。
     // shadowed(個人版に隠された共有版)は実行候補から除外する(決定ログ 2026-08-12: 個人優先)。
@@ -423,6 +476,16 @@ fn spawn_task(
         .find(|d| d.id == agent_id)
         .ok_or_else(|| format!("エージェント {agent_id} が見つかりません"))?
         .clone();
+    // 来歴(provenance)用に、selected の一部を TaskSpec へ move する前に複製しておく
+    // (docs/roadmap.md v0.6)。
+    let agent_name = selected.name.clone();
+    let agent_source_path = selected.source_path.clone();
+    let agent_scope = selected.scope;
+    let model_for_provenance = selected
+        .model
+        .clone()
+        .or_else(|| cfg.default_model.clone())
+        .unwrap_or_else(|| "(SDK 既定)".to_string());
     let agent_specs: Vec<copilot::AgentSpec> = definitions
         .iter()
         .map(|d| copilot::AgentSpec {
@@ -455,7 +518,12 @@ fn spawn_task(
     // docs/open-questions.md #3 が未決のため、確定させない(暫定コメントとして残す)。
     // rules は agents.json の該当エージェント設定から構成する。未設定なら既定
     // (allowed/denied 空、output_dir 無し、auto_approve true。docs/architecture.md §7.1)。
-    let rules = agents_cfg.agents.get(&agent_id).cloned().unwrap_or_default();
+    let mut rules = agents_cfg.agents.get(&agent_id).cloned().unwrap_or_default();
+    // 管理者ポリシー(data/policy.json)の forcedDeniedTools をマージする(docs/roadmap.md v0.6)。
+    // UI からは変更できない(get_app_config で一覧表示するだけ)。
+    if let Some(policy) = config::load_policy(&data_dir)? {
+        rules.denied_tools = config::merge_forced_denied_tools(rules.denied_tools, &policy.forced_denied_tools);
+    }
     // 実行中タスクと同じ outputDir なら起動を拒否する(docs/roadmap.md v0.5: 成果物の混線防止)。
     let output_dir = rules.output_dir.clone();
 
@@ -471,6 +539,7 @@ fn spawn_task(
         rules,
         bridge: state.bridge.clone(),
         unattended,
+        logs_dir: logs_dir.clone(),
     };
 
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
@@ -521,8 +590,8 @@ fn spawn_task(
 
         match copilot::run_task(cli_path, spec, cancel_rx, sink).await {
             Ok(outcome) => {
-                // 監査ログ: 履歴ファイルに残らない summary(完了時の最終メッセージ/失敗時のエラー文)
-                // をここで記録しておく。
+                // デバッグ用: 履歴ファイルに残らない summary(完了時の最終メッセージ/失敗時のエラー文)
+                // をここで記録しておく(data/logs/session-*.jsonl の監査ログとは別物)。
                 eprintln!(
                     "[history] session={} status={:?} summary={}",
                     outcome.session_id, outcome.status, outcome.summary
@@ -532,6 +601,27 @@ fn spawn_task(
                 let entry = history::entry_from_outcome(&agent_id, &prompt_for_history, &outcome, trigger);
                 if let Err(e) = history::append(&data_dir, &entry) {
                     eprintln!("履歴の追記に失敗しました: {e}");
+                }
+                // 来歴(provenance)の記録(docs/roadmap.md v0.6)。history 追記と同様、タスク自体は
+                // 既に終わっているため、失敗しても eprintln に留める(TaskFailed化しない)。
+                let agent_version = agent_version_for_provenance(&data_dir, agent_scope, &agent_source_path);
+                let prov = audit::Provenance {
+                    session_id: outcome.session_id.clone(),
+                    agent_id: agent_id.clone(),
+                    agent_name: agent_name.clone(),
+                    agent_version,
+                    agent_source_path: agent_source_path.display().to_string(),
+                    model: model_for_provenance.clone(),
+                    app_version: env!("CARGO_PKG_VERSION").to_string(),
+                    prompt: prompt_for_history.clone(),
+                    started_at: outcome.started_at.clone(),
+                    duration_ms: outcome.duration_ms,
+                    status: outcome.status.as_str().to_string(),
+                    input_files: outcome.input_files.clone(),
+                    output_files: outcome.output_files.clone(),
+                };
+                if let Err(e) = audit::write_provenance(&logs_dir, &prov) {
+                    eprintln!("来歴の記録に失敗しました: {e}");
                 }
                 notify_task_result(&app_handle, &agent_id, &outcome);
             }
@@ -697,7 +787,24 @@ fn main() {
         .setup(|app| {
             // スケジューラはアプリ(ウィンドウ)起動中のみ動作する(docs/roadmap.md v0.4: 常駐は未決のため実装しない)。
             let handle = app.handle().clone();
-            tauri::async_runtime::spawn(scheduler_loop(handle));
+            tauri::async_runtime::spawn(scheduler_loop(handle.clone()));
+
+            // 起動時にログ保持期間(docs/open-questions.md #5、既定90日)を過ぎた監査ログ・
+            // 来歴を削除する。失敗してもアプリ起動は妨げない(eprintln のみ)。
+            let state = handle.state::<AppState>();
+            if let Ok(data_dir) = state.data_dir() {
+                match config::load_app_config(data_dir) {
+                    Ok(cfg) => {
+                        let logs_dir = data_dir.join("logs");
+                        match audit::cleanup_old_logs(&logs_dir, cfg.log_retention_days) {
+                            Ok(0) => {}
+                            Ok(n) => eprintln!("保持期間を過ぎたログを {n} 件削除しました"),
+                            Err(e) => eprintln!("古いログの削除に失敗しました: {e}"),
+                        }
+                    }
+                    Err(e) => eprintln!("設定の読み込みに失敗しました(ログ保持期間の適用をスキップ): {e}"),
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -717,6 +824,7 @@ fn main() {
             open_update_folder,
             list_history,
             open_output_folder,
+            open_logs_folder,
             start_task,
             cancel_task,
             respond_permission,
