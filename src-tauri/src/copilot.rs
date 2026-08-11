@@ -9,15 +9,58 @@ use crate::events::AppEvent;
 use github_copilot_sdk::handler::ApproveAllHandler;
 use github_copilot_sdk::session_events::{
     AssistantIntentData, AssistantMessageData, AssistantUsageData, SessionErrorData,
-    SessionUsageInfoData, SubagentCompletedData, SubagentFailedData, SubagentStartedData,
-    ToolExecutionCompleteData, ToolExecutionStartData,
+    SessionIdleData, SessionUsageInfoData, SubagentCompletedData, SubagentFailedData,
+    SubagentStartedData, ToolExecutionCompleteData, ToolExecutionStartData,
 };
-use github_copilot_sdk::types::{MessageOptions, SessionConfig, SessionEvent};
+use github_copilot_sdk::types::{CustomAgentConfig, MessageOptions, SessionConfig, SessionEvent};
 use github_copilot_sdk::{CliProgram, Client, ClientOptions};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// エージェント 1 件分の SDK 用スペック(docs/sdk-notes.md「カスタムエージェント」節)。
+/// `.agent.md` のパース結果(agents::AgentDefinition)から main.rs が組み立てる。
+/// SDK の `CustomAgentConfig` へは `to_custom_agent_config` でこのモジュール内でのみ変換する。
+#[derive(Debug, Clone)]
+pub struct AgentSpec {
+    pub name: String,
+    pub display_name: Option<String>,
+    pub description: String,
+    pub tools: Option<Vec<String>>,
+    pub model: Option<String>,
+    pub prompt: String,
+}
+
+/// AgentSpec → CustomAgentConfig。SDK 型はこの関数の戻り値としてのみこのモジュール内に留まる。
+fn to_custom_agent_config(spec: &AgentSpec) -> CustomAgentConfig {
+    let mut config =
+        CustomAgentConfig::new(spec.name.clone(), spec.prompt.clone()).with_description(spec.description.clone());
+    if let Some(display_name) = &spec.display_name {
+        config = config.with_display_name(display_name.clone());
+    }
+    if let Some(tools) = &spec.tools {
+        config = config.with_tools(tools.clone());
+    }
+    if let Some(model) = &spec.model {
+        config = config.with_model(model.clone());
+    }
+    config
+}
+
+/// run_task 1 回分の入力(docs/development.md ステップ3)。
+pub struct TaskSpec {
+    pub prompt: String,
+    /// TaskStarted.agent_id に使う、選択されたエージェントの id。
+    pub agent_id: String,
+    /// セッションに渡す全定義(選択外も委任候補として渡す。SDK 側が自動委任を判断する)。
+    pub agents: Vec<AgentSpec>,
+    /// with_agent に渡す name(agents 内のいずれかの name と一致すること)。
+    pub selected_agent_name: String,
+    pub working_directory: PathBuf,
+    /// config.defaultModel。None なら SDK 既定に委ねる。
+    pub session_model: Option<String>,
+}
 
 /// CLI パスの解決(docs/architecture.md §1.2 の順): 設定値 → 環境変数 COPILOT_CLI_PATH → PATH 探索。
 pub fn resolve_cli_path(configured: Option<&Path>) -> Result<PathBuf, String> {
@@ -103,7 +146,7 @@ impl EventContext {
             "assistant.usage" => self.on_assistant_usage(ev),
             "session.usage_info" => self.on_session_usage_info(ev),
             "assistant.message" => self.on_assistant_message(ev),
-            "session.idle" => self.on_session_idle(),
+            "session.idle" => self.on_session_idle(ev),
             "session.error" => self.on_session_error(ev),
             _ => Vec::new(),
         }
@@ -234,7 +277,14 @@ impl EventContext {
         Vec::new()
     }
 
-    fn on_session_idle(&self) -> Vec<AppEvent> {
+    /// 中断は `Session::abort()` の RPC 経由(disconnect ではない)。進行中の
+    /// send_and_wait はいずれにせよ session.idle で解決されるため、ユーザー中断か
+    /// 通常完了かは payload の aborted フラグで判別する(docs/sdk-notes.md「中断」節)。
+    fn on_session_idle(&self, ev: &SessionEvent) -> Vec<AppEvent> {
+        let aborted = ev.typed_data::<SessionIdleData>().and_then(|d| d.aborted).unwrap_or(false);
+        if aborted {
+            return vec![AppEvent::TaskCancelled { session_id: self.session_id.clone() }];
+        }
         vec![AppEvent::TaskCompleted {
             session_id: self.session_id.clone(),
             summary: self.last_main_message.clone(),
@@ -269,7 +319,6 @@ const DRAIN_TIMEOUT: Duration = Duration::from_millis(200);
 
 enum Outcome {
     Completed,
-    Cancelled,
     Failed(String),
 }
 
@@ -277,7 +326,7 @@ enum Outcome {
 /// sink には変換済み AppEvent を渡すだけで、emit するのは呼び出し側の責務(main.rs)。
 pub async fn run_task(
     cli_path: PathBuf,
-    prompt: String,
+    spec: TaskSpec,
     mut cancel: tokio::sync::oneshot::Receiver<()>,
     sink: impl Fn(AppEvent) + Send + Sync + 'static,
 ) -> Result<(), String> {
@@ -287,10 +336,17 @@ pub async fn run_task(
 
     // TODO(ステップ4): permissions::decide を呼ぶ自前 PermissionHandler に差し替える。
     // それまでは全承認固定(ApproveAllHandler)。
-    let session = match client
-        .create_session(SessionConfig::default().with_permission_handler(Arc::new(ApproveAllHandler)))
-        .await
-    {
+    let custom_agents: Vec<CustomAgentConfig> = spec.agents.iter().map(to_custom_agent_config).collect();
+    let mut config = SessionConfig::default()
+        .with_permission_handler(Arc::new(ApproveAllHandler))
+        .with_custom_agents(custom_agents)
+        .with_agent(spec.selected_agent_name.clone())
+        .with_working_directory(spec.working_directory.clone());
+    if let Some(model) = &spec.session_model {
+        config = config.with_model(model.clone());
+    }
+
+    let session = match client.create_session(config).await {
         Ok(s) => s,
         Err(e) => {
             if let Err(stop_err) = client.stop().await {
@@ -303,32 +359,43 @@ pub async fn run_task(
     let session_id = session.id().to_string();
     sink(AppEvent::TaskStarted {
         session_id: session_id.clone(),
-        // TODO(ステップ3): エージェント選択を接続するまでは空文字。
-        agent_id: String::new(),
+        agent_id: spec.agent_id,
         started_at: format_rfc3339_now(),
     });
 
     let mut ctx = EventContext::new();
     ctx.session_id = session_id.clone();
     let mut events = session.subscribe();
-    // session.error 由来の TaskFailed が convert() 側で既に送られたかどうか。
-    // 送られていれば run_task 側の失敗フォールバックで重複させない。
+    // session.error 由来の TaskFailed、または aborted な session.idle 由来の TaskCancelled が
+    // convert() 側で既に送られたかどうか。送られていれば run_task 側の失敗フォールバックで重複させない。
     let mut terminal_sent = false;
+    // cancel は一度シグナルを受けたら abort() を呼ぶだけで、以降は select! の対象から外す
+    // (oneshot::Receiver は完了後の再 poll を想定していないため)。
+    let mut cancel_requested = false;
 
-    let send_fut = session.send_and_wait(MessageOptions::new(prompt).with_wait_timeout(SEND_AND_WAIT_TIMEOUT));
+    let send_fut = session.send_and_wait(MessageOptions::new(spec.prompt).with_wait_timeout(SEND_AND_WAIT_TIMEOUT));
     tokio::pin!(send_fut);
 
     let outcome = loop {
         tokio::select! {
-            _ = &mut cancel => {
-                break Outcome::Cancelled;
+            _ = &mut cancel, if !cancel_requested => {
+                cancel_requested = true;
+                // 中断の正道は abort()(disconnect ではない)。send_and_wait は
+                // 引き続き session.idle(aborted=true)で解決されるのを待つ
+                // (docs/sdk-notes.md「中断」節)。
+                if let Err(e) = session.abort().await {
+                    eprintln!("セッションの中断に失敗しました: {e}");
+                }
             }
             send_result = &mut send_fut => {
                 loop {
                     match tokio::time::timeout(DRAIN_TIMEOUT, events.recv()).await {
                         Ok(Ok(event)) => {
                             for app_event in ctx.convert(&event) {
-                                if matches!(app_event, AppEvent::TaskCompleted { .. } | AppEvent::TaskFailed { .. }) {
+                                if matches!(
+                                    app_event,
+                                    AppEvent::TaskCompleted { .. } | AppEvent::TaskFailed { .. } | AppEvent::TaskCancelled { .. }
+                                ) {
                                     terminal_sent = true;
                                 }
                                 sink(app_event);
@@ -345,7 +412,10 @@ pub async fn run_task(
             event = events.recv() => {
                 if let Ok(event) = event {
                     for app_event in ctx.convert(&event) {
-                        if matches!(app_event, AppEvent::TaskCompleted { .. } | AppEvent::TaskFailed { .. }) {
+                        if matches!(
+                            app_event,
+                            AppEvent::TaskCompleted { .. } | AppEvent::TaskFailed { .. } | AppEvent::TaskCancelled { .. }
+                        ) {
                             terminal_sent = true;
                         }
                         sink(app_event);
@@ -364,10 +434,6 @@ pub async fn run_task(
     }
 
     match outcome {
-        Outcome::Cancelled => {
-            sink(AppEvent::TaskCancelled { session_id });
-            Ok(())
-        }
         Outcome::Completed => Ok(()),
         Outcome::Failed(e) => {
             // session.error 経由なら convert() 側で TaskFailed 済み。タイムアウト等
@@ -564,6 +630,20 @@ mod tests {
                 assert!(output_files.is_empty());
             }
             other => panic!("expected TaskCompleted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_idle_with_aborted_flag_becomes_task_cancelled() {
+        let mut ctx = EventContext::new();
+        ctx.session_id = "sess-1".into();
+
+        let idle = mk_event("session.idle", None, json!({"aborted": true}));
+        let out = ctx.convert(&idle);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            AppEvent::TaskCancelled { session_id } => assert_eq!(session_id, "sess-1"),
+            other => panic!("expected TaskCancelled, got {other:?}"),
         }
     }
 

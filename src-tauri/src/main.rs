@@ -90,13 +90,7 @@ fn open_output_folder(state: State<AppState>, agent_id: String) -> Result<(), St
 }
 
 #[tauri::command]
-fn start_task(
-    app: tauri::AppHandle,
-    state: State<AppState>,
-    // TODO(ステップ3): エージェント定義の選択を SDK セッションに接続する
-    _agent_id: String,
-    prompt: String,
-) -> Result<(), String> {
+fn start_task(app: tauri::AppHandle, state: State<AppState>, agent_id: String, prompt: String) -> Result<(), String> {
     {
         let running = state.running.lock().unwrap();
         let running_count = if running.is_some() { 1 } else { 0 };
@@ -108,6 +102,53 @@ fn start_task(
     let data_dir = state.data_dir()?.clone();
     let cfg = config::load_app_config(&data_dir)?;
     let cli_path = copilot::resolve_cli_path(cfg.copilot_cli_path.as_deref())?;
+
+    // エージェント定義を全件読み、選択された agent_id に一致するものを探す。
+    // 選択外の定義もセッションに渡す(SDK 側の自動委任の候補にするため。docs/sdk-notes.md「カスタムエージェント」節)。
+    let definitions = agents::scan_definitions(&cfg.agent_dirs)?;
+    let selected = definitions
+        .iter()
+        .find(|d| d.id == agent_id)
+        .ok_or_else(|| format!("エージェント {agent_id} が見つかりません"))?
+        .clone();
+    let agent_specs: Vec<copilot::AgentSpec> = definitions
+        .iter()
+        .map(|d| copilot::AgentSpec {
+            name: d.name.clone(),
+            display_name: None,
+            description: d.description.clone(),
+            tools: d.tools.clone(),
+            model: d.model.clone(),
+            prompt: d.body.clone(),
+        })
+        .collect();
+
+    // 作業ディレクトリ: agents.json の inputDir の親、無ければ専用ワークスペース
+    // (docs/architecture.md §7.2: ユーザープロファイル直下や無関係なファイルを含む
+    // 親フォルダを作業ディレクトリにしない)。
+    let agents_cfg = config::load_agents_config(&data_dir)?;
+    let working_directory = match agents_cfg.agents.get(&agent_id).and_then(|s| s.input_dir.clone()) {
+        Some(input_dir) => input_dir.parent().map(PathBuf::from).unwrap_or(input_dir),
+        None => {
+            let dir = data_dir.join("workspace").join(&agent_id);
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| format!("ワークスペースフォルダを作成できません({}): {e}", dir.display()))?;
+            dir
+        }
+    };
+
+    // session_model は暫定運用: SDK 側の仕様(CustomAgentConfig.model はセッションモデルへの
+    // フォールバック付き上書き)により、エージェント定義の model が実質最優先になる。
+    // ここで渡す config.defaultModel はその親(フォールバック先)。優先順位の明文化は
+    // docs/open-questions.md #3 が未決のため、確定させない(暫定コメントとして残す)。
+    let spec = copilot::TaskSpec {
+        prompt,
+        agent_id: agent_id.clone(),
+        agents: agent_specs,
+        selected_agent_name: selected.name,
+        working_directory,
+        session_model: cfg.default_model.clone(),
+    };
 
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     {
@@ -141,7 +182,7 @@ fn start_task(
             }
         };
 
-        if let Err(e) = copilot::run_task(cli_path, prompt, cancel_rx, sink).await {
+        if let Err(e) = copilot::run_task(cli_path, spec, cancel_rx, sink).await {
             eprintln!("タスクの実行に失敗しました: {e}");
         }
 

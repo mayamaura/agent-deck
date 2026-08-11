@@ -60,9 +60,10 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin smoke
   `copilot.rs` 新設(resolve_cli_path / EventContext::convert / run_task)。フロントは時系列羅列表示。
   ヘッドレス動作確認は `cargo run --bin step2_check`(COPILOT_CLI_PATH 必須)。
   既知の残課題: 中断は disconnect ベース → ステップ3で `Session::abort()` + `aborted` フラグ分岐に切替予定
-- [ ] **ステップ3: エージェント定義の読み込み**
-  `.agent.md` の走査・パース(実装済み: `agents.rs`)を UI につなぎ、
-  エージェントを選んで実行できるようにする(SDK セッションへのエージェント指定方法は要裏取り)
+- [x] **ステップ3: エージェント定義の読み込み**(2026-08-12 完了)
+  `.agent.md` のフルパース(tools/model/本文)→ `CustomAgentConfig` 詰め替え → `with_agent` で選択実行。
+  選択外の定義も委任候補としてセッションに渡す。中断は `Session::abort()` ベースに切替済み。
+  ヘッドレス検証は `cargo run --bin step3_check`(通常完了+中断の 2 ラウンド)
 - [ ] **ステップ4: 入出力設定と権限制御**
   agents.json の読み書き(実装済み: `config.rs`)、設定画面(フォルダ選択に
   `tauri-plugin-dialog` を追加)、権限判定(実装済み: `permissions.rs`)の SDK 接続

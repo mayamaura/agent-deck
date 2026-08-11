@@ -40,12 +40,24 @@ async fn main() {
         let _ = tx.send(ev);
     };
 
-    let run = tokio::spawn(copilot::run_task(
-        cli_path,
-        "「疎通OK」とだけ返答してください".to_string(),
-        cancel_rx,
-        sink,
-    ));
+    // ステップ2はイベント可視化の確認が目的でカスタムエージェントの検証はステップ3の
+    // step3_check.rs 側で行うため、ここでは最小構成のダミーエージェント1件だけを渡す。
+    let spec = copilot::TaskSpec {
+        prompt: "「疎通OK」とだけ返答してください".to_string(),
+        agent_id: "default".to_string(),
+        agents: vec![copilot::AgentSpec {
+            name: "default".to_string(),
+            display_name: None,
+            description: "疎通確認用".to_string(),
+            tools: None,
+            model: None,
+            prompt: "あなたは疎通確認用のアシスタントです。".to_string(),
+        }],
+        selected_agent_name: "default".to_string(),
+        working_directory: std::env::temp_dir(),
+        session_model: None,
+    };
+    let run = tokio::spawn(copilot::run_task(cli_path, spec, cancel_rx, sink));
 
     let mut saw_started = false;
     let mut saw_completed = false;

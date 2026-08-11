@@ -127,6 +127,7 @@ export default function App() {
         <h2>実行ビュー</h2>
         {selected ? (
           <>
+            <p className="muted">{agents.find((a) => a.id === selected)?.description}</p>
             <textarea
               className="prompt-input"
               value={prompt}
