@@ -43,6 +43,7 @@ export type AppEvent =
   | { kind: "permissionRequested"; sessionId: string; requestId: string; permissionKind: string; detail: string }
   | { kind: "usageUpdated"; sessionId: string; currentTokens: number; tokenLimit: number | null }
   | { kind: "taskCompleted"; sessionId: string; summary: string; outputFiles: string[] }
-  | { kind: "taskFailed"; sessionId: string; error: string };
+  | { kind: "taskFailed"; sessionId: string; error: string }
+  | { kind: "taskCancelled"; sessionId: string };
 
 export const EVENT_CHANNEL = "agent://event";

@@ -105,6 +105,7 @@ SDK イベント → AppEvent の対応(ステップ2で実装。イベント名
 | `assistant.usage` / `session.usage_info` | `UsageUpdated` |
 | `session.idle` | `TaskCompleted` |
 | `session.error` | `TaskFailed` |
+| (ユーザー中断 — cancel_task) | `TaskCancelled` |
 
 注意(実機確認): ストリーミングの有無は実行ごとに揺れる。delta 系
 (`assistant.message_delta` の `deltaContent`)が来ない実行があるため、

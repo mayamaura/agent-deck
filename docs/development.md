@@ -56,10 +56,10 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin smoke
 - [x] **ステップ1: 疎通確認**(2026-08-12 完了)
   SDK でセッションを作り、固定プロンプトへの応答を確認。成果物は `src-tauri/src/bin/smoke.rs`。
   確定した API の実態は [sdk-notes.md](sdk-notes.md) の「ステップ1 疎通確認の結果」参照
-- [ ] **ステップ2: イベントの可視化**
-  セッションイベントを購読し `AppEvent` に変換してフロントに emit(`copilot.rs` の新設)。
-  フロントは受け取ったイベントを時系列でそのまま羅列表示。ツリー化はまだしない。
-  注意: ストリーミング有無の揺れに対応すること(architecture.md §4)
+- [x] **ステップ2: イベントの可視化**(2026-08-12 完了)
+  `copilot.rs` 新設(resolve_cli_path / EventContext::convert / run_task)。フロントは時系列羅列表示。
+  ヘッドレス動作確認は `cargo run --bin step2_check`(COPILOT_CLI_PATH 必須)。
+  既知の残課題: 中断は disconnect ベース → ステップ3で `Session::abort()` + `aborted` フラグ分岐に切替予定
 - [ ] **ステップ3: エージェント定義の読み込み**
   `.agent.md` の走査・パース(実装済み: `agents.rs`)を UI につなぎ、
   エージェントを選んで実行できるようにする(SDK セッションへのエージェント指定方法は要裏取り)

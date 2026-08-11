@@ -3,8 +3,7 @@
 
 mod agents;
 mod config;
-// ステップ2(イベント可視化)で使用開始。使い始めたら allow を外すこと
-#[allow(dead_code)]
+mod copilot;
 mod events;
 mod history;
 // ステップ4(権限制御)で使用開始。使い始めたら allow を外すこと
@@ -13,12 +12,27 @@ mod permissions;
 
 use config::AgentSettings;
 use std::path::PathBuf;
-use tauri::State;
+use std::sync::Mutex;
+use tauri::{Emitter, Manager, State};
+
+/// v0.1 の同時実行数上限。1 本固定だが、上限をこの定数に集約しておくことで
+/// 将来の並行実行(roadmap.md v0.5)対応時にここだけ変更すれば済むようにする
+/// (docs/open-questions.md #4 / roadmap.md「セッション同時1本をデータ構造に焼き込まない」)。
+const MAX_CONCURRENT_TASKS: usize = 1;
+
+/// 実行中タスクの管理情報。session_id は TaskStarted イベント受信時に埋まる
+/// (start_task 呼び出し時点ではまだセッションが存在しないため)。
+struct RunningTask {
+    session_id: String,
+    cancel: tokio::sync::oneshot::Sender<()>,
+}
 
 /// data/ の解決結果を保持する。解決に失敗した場合もエラーを保持し、
 /// 各コマンドがフロントへ理由を返す(docs/architecture.md §6.1: 起動時にエラーを出す)。
 struct AppState {
     data_dir: Result<PathBuf, String>,
+    // MAX_CONCURRENT_TASKS == 1 の間は Option で足りる。
+    running: Mutex<Option<RunningTask>>,
 }
 
 impl AppState {
@@ -75,16 +89,89 @@ fn open_output_folder(state: State<AppState>, agent_id: String) -> Result<(), St
     Ok(())
 }
 
-// --- 以下はステップ1(SDK 疎通)以降で copilot.rs とともに実装する ---
-
 #[tauri::command]
-fn start_task(_agent_id: String, _prompt: String) -> Result<String, String> {
-    Err("未実装: ステップ1で github-copilot-sdk の疎通確認後に実装します".into())
+fn start_task(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    // TODO(ステップ3): エージェント定義の選択を SDK セッションに接続する
+    _agent_id: String,
+    prompt: String,
+) -> Result<(), String> {
+    {
+        let running = state.running.lock().unwrap();
+        let running_count = if running.is_some() { 1 } else { 0 };
+        if running_count >= MAX_CONCURRENT_TASKS {
+            return Err("タスクが実行中です".into());
+        }
+    }
+
+    let data_dir = state.data_dir()?.clone();
+    let cfg = config::load_app_config(&data_dir)?;
+    let cli_path = copilot::resolve_cli_path(cfg.copilot_cli_path.as_deref())?;
+
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    {
+        // 冒頭のチェックとこの set の間に別の start_task が割り込む可能性があるため、
+        // 同一ロック内で再チェックしてから登録する(TOCTOU 防止)。
+        let mut running = state.running.lock().unwrap();
+        if running.is_some() {
+            return Err("タスクが実行中です".into());
+        }
+        *running = Some(RunningTask {
+            session_id: String::new(),
+            cancel: cancel_tx,
+        });
+    }
+
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let sink_handle = app_handle.clone();
+        let sink = move |ev: events::AppEvent| {
+            // TaskStarted でセッション ID が判明した時点で RunningTask に反映する
+            // (cancel_task が session_id を突き合わせられるようにするため)。
+            if let events::AppEvent::TaskStarted { session_id, .. } = &ev {
+                if let Some(state) = sink_handle.try_state::<AppState>() {
+                    if let Some(running) = state.running.lock().unwrap().as_mut() {
+                        running.session_id = session_id.clone();
+                    }
+                }
+            }
+            if let Err(e) = sink_handle.emit(events::EVENT_CHANNEL, &ev) {
+                eprintln!("イベント送信に失敗しました: {e}");
+            }
+        };
+
+        if let Err(e) = copilot::run_task(cli_path, prompt, cancel_rx, sink).await {
+            eprintln!("タスクの実行に失敗しました: {e}");
+        }
+
+        if let Some(state) = app_handle.try_state::<AppState>() {
+            *state.running.lock().unwrap() = None;
+        }
+    });
+
+    Ok(())
 }
 
 #[tauri::command]
-fn cancel_task(_session_id: String) -> Result<(), String> {
-    Err("未実装: ステップ1で実装します".into())
+fn cancel_task(state: State<AppState>, session_id: String) -> Result<(), String> {
+    let mut running = state.running.lock().unwrap();
+    match running.take() {
+        Some(task) if task.session_id == session_id => {
+            // 受信側(run_task)が既に終了していれば送信は失敗するが、握りつぶしてよい
+            // (二重中断や完了直後の中断は正常なタイミング差であり、エラーではない)。
+            let _ = task.cancel.send(());
+            Ok(())
+        }
+        Some(other) => {
+            let running_id = other.session_id.clone();
+            *running = Some(other);
+            Err(format!(
+                "指定されたセッション({session_id})は実行中ではありません(実行中: {running_id})"
+            ))
+        }
+        None => Err("実行中のタスクはありません".into()),
+    }
 }
 
 #[tauri::command]
@@ -96,6 +183,7 @@ fn main() {
     tauri::Builder::default()
         .manage(AppState {
             data_dir: config::data_dir(),
+            running: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             list_agents,

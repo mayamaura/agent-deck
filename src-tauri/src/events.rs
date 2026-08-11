@@ -1,6 +1,9 @@
 use serde::Serialize;
 
-/// フロントへ emit する単一チャネル名(docs/architecture.md §4)。
+/// フロントへ emit する単一チャネル名(docs/architecture.md §4)。main.rs から使用。
+/// bin/step2_check.rs はこのファイルを #[path] で共有するが Tauri emit を経由しないため
+/// 参照しない(そちらのクレートルート単体では dead_code になるので allow)。
+#[allow(dead_code)]
 pub const EVENT_CHANNEL: &str = "agent://event";
 
 /// フロントへ流すアプリ独自イベント。
@@ -46,6 +49,8 @@ pub enum AppEvent {
         tool_name: String,
         success: bool,
     },
+    // ステップ4(権限制御)で PermissionHandler 実装から構築する。使い始めたら allow を外すこと
+    #[allow(dead_code)]
     PermissionRequested {
         session_id: String,
         request_id: String,
@@ -66,5 +71,9 @@ pub enum AppEvent {
     TaskFailed {
         session_id: String,
         error: String,
+    },
+    /// ユーザーによる中断(TaskFailed とは区別する)。
+    TaskCancelled {
+        session_id: String,
     },
 }

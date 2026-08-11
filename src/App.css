@@ -68,6 +68,30 @@ body {
 .muted { color: #777; }
 .error { color: #b00020; }
 
+.prompt-input {
+  width: 100%;
+  font: inherit;
+  padding: 4px;
+  margin-bottom: 6px;
+}
+
+.run-controls {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.event-log {
+  list-style: none;
+  padding: 0;
+  font-size: 12px;
+}
+
+.event-log li {
+  padding: 2px 0;
+  border-bottom: 1px solid #eee;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;

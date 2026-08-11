@@ -17,5 +17,7 @@ serde_json = "1"
 # docs/architecture.md §1.2 により bundled-cli は無効化。
 # 1.0.9 は 2026-08-12 に crates.io で確認した最新安定版(docs/sdk-notes.md 参照)
 github-copilot-sdk = { version = "1.0.9", default-features = false }
-# smoke バイナリの #[tokio::main] 用。SDK が非同期 API(io/sync/process/net)を要求するため tokio ランタイムが必要
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# smoke バイナリの #[tokio::main] 用。SDK が非同期 API(io/sync/process/net)を要求するため tokio ランタイムが必要。
+# sync/time は copilot.rs の中断用 oneshot チャネルと send_and_wait 後のイベントドレインで使用
+# (github-copilot-sdk 自体も同機能を要求するため実質的には既に有効だったが、明示しておく)
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }

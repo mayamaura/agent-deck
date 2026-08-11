@@ -103,6 +103,63 @@ session.background_tasks_changed
 
 (tool.* / subagent.* / permission.* はツールを使わない単純プロンプトのため未観測。ステップ2以降で実プロンプトで確認する)
 
+## SessionConfig / 権限 / 中断の API 実態(2026-08-12 ソース直読み。ステップ2〜4 の設計根拠)
+
+出典はローカル cargo レジストリの `github-copilot-sdk-1.0.9` ソース(types.rs / session.rs / handler.rs / generated/session_events.rs)。
+
+### カスタムエージェント(ステップ3の要)
+
+- **SDK は `.agent.md` を読まない。探索・パースは完全にアプリ側の責務。**
+  パース結果を `CustomAgentConfig::new(name, prompt)`(+ `with_tools` / `with_model` /
+  `with_display_name` / `with_infer` 等)に詰め替え、
+  `SessionConfig::with_custom_agents([...])` で渡し、`with_agent(name)` で初期選択する
+- `CustomAgentConfig` の主なフィールド: `name`(必須)/ `prompt`(必須 = .agent.md の本文)/
+  `tools: Option<Vec<String>>`(None = 全ツール)/ `model` / `infer: Option<bool>`
+- **サブエージェント委任は自動**: ランタイムがプロンプトと各エージェントの name/description を
+  照合して委任する。`infer: false` で自動委任の対象外にできる
+- `SessionConfig::with_working_directory(dir)` で作業ディレクトリ指定(architecture.md §7.2 用)。
+  `with_model(...)` でセッションモデル指定(エージェント側 `model` は親モデルへのフォールバック付き上書き)
+
+### ツール制限
+
+- `SessionConfig` の `available_tools` / `excluded_tools` は**単純なツール名のみ**
+  (excluded 優先が wire で固定)。CLI フラグの `shell(python:*)` パターン構文を SDK が
+  解釈する証拠は無し → **パターンの適用は自前の PermissionHandler(permissions::decide)で行う**
+
+### 権限ハンドラ(ステップ4の要)
+
+- `PermissionHandler::handle(&self, session_id, request_id, data: PermissionRequestData) -> PermissionResult`(async)
+- `PermissionResult::approve_once()` / `reject(feedback)` / `user_not_available()` で応答
+- `PermissionRequestData`: 型付きは `kind: Option<PermissionRequestKind>`(shell/write/read/url/mcp/…)と
+  `tool_call_id` 程度。**具体的なツール名や書き込み先パスは `extra: Value` の中**:
+  `extra["permissionRequest"]["path"]`(SDK のテストで実証)、ツール名は `extra["permissionRequest"]` 配下
+  (形は CLI バージョン依存と明記あり)。**防御的にパースし、取れなければ Ask に倒すこと**
+
+### 中断
+
+- **タスク中断の正道は `Session::abort()`**(`session.abort` RPC)。進行中の `send_and_wait` は
+  `session.idle`(`SessionIdleData.aborted: Some(true)`)で解決される
+  → idle 処理では `aborted` を見て TaskCompleted / TaskCancelled を分岐すること
+- `disconnect()` はセッション状態を保持したまま切断(中断とは別用途)
+
+### イベント payload の確定フィールド(変換実装で使うもの)
+
+- `subagent.started`: `agent_name` / `agent_display_name` / `tool_call_id` / `model?`
+- `subagent.completed`: `agent_name` / `duration_ms?` / `total_tokens?` / `tool_call_id`
+- `subagent.failed`: 上記 + `error`
+- `tool.execution_start`: `tool_name` / `tool_call_id` / `arguments?`
+- `tool.execution_complete`: `success: bool` / `tool_call_id` / `error?{code?, message}`
+- `assistant.intent`: `intent: String`
+- `session.usage_info`: `current_tokens: i64` / `token_limit: i64`(両方必須フィールド)
+- `session.error`: `message` / `error_type` / `error_code?` / `status_code?`
+- 注意: `assistant.usage` の一部フィールド(`quota_snapshots` 等)は `pub(crate)` で外から読めない。
+  必要になったら生 JSON(`data: Value`)経由で読む
+
+### ClientOptions 補足
+
+- `extra_args: Vec<String>` で CLI に生フラグを渡せる(パターン構文のツール制御が必要になった場合の退避経路)
+- `working_directory`(ビルダーは `with_cwd`)は CLI プロセス自体の cwd。セッションの作業ディレクトリとは別物
+
 ## Copilot CLI
 
 - 最新 **1.0.79**(2026-08-10)。インストール: `npm install -g @github/copilot`(Node 22+、
