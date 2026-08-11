@@ -12,17 +12,24 @@ pub enum Decision {
     Ask,
 }
 
+/// agents.json の運用設定を権限判定に使う際の呼び名(docs/architecture.md §6.3)。
+/// AgentSettings と同一の型で足りるため、別構造体は起こさずエイリアスにする。
+pub type PermissionRules = AgentSettings;
+
 /// SDK の権限要求をアプリ独自に要約したもの。SDK の型をここに持ち込まない。
 #[derive(Debug, Clone)]
 pub struct PermissionInput {
+    /// ツール種別名(例: "shell", "write")。CLI の --allow-tool/--deny-tool の NAME 部分に対応。
     pub tool_name: String,
+    /// shell ならコマンド文字列、他ツールなら引数やパスなどの要約。
+    pub detail: Option<String>,
     /// 書き込み系ツールの場合の書き込み先
     pub write_path: Option<PathBuf>,
 }
 
 /// 判定ロジック(docs/architecture.md §7.1 の 1→4 の順)。
 pub fn decide(settings: &AgentSettings, input: &PermissionInput) -> Decision {
-    if settings.denied_tools.iter().any(|p| tool_matches(p, &input.tool_name)) {
+    if settings.denied_tools.iter().any(|p| tool_matches(p, input)) {
         return Decision::Deny;
     }
     if settings.auto_approve_write_in_output_dir {
@@ -32,20 +39,38 @@ pub fn decide(settings: &AgentSettings, input: &PermissionInput) -> Decision {
             }
         }
     }
-    if settings.allowed_tools.iter().any(|p| tool_matches(p, &input.tool_name)) {
+    if settings.allowed_tools.iter().any(|p| tool_matches(p, input)) {
         return Decision::Approve;
     }
     Decision::Ask
 }
 
-/// ツールパターンの照合。
-/// ponytail: 完全一致と末尾 `*` の前方一致のみ。`shell(python:*)` のような CLI 側の
-/// 詳細記法は SDK の権限要求の実形が確定してから(ステップ4)拡張する。
-fn tool_matches(pattern: &str, tool_name: &str) -> bool {
-    match pattern.strip_suffix('*') {
-        Some(prefix) => tool_name.starts_with(prefix),
-        None => pattern == tool_name,
+/// ツールパターンの照合(CLI の `--allow-tool` / `--deny-tool` 記法。docs/sdk-notes.md CLI 節)。
+///
+/// パターンは `名前` または `名前(フィルタ)`。
+/// - `名前` のみ(例 `write`, `shell`)→ input.tool_name と一致すれば detail 不問でマッチ
+/// - `名前(フィルタ)` で フィルタ が `接頭辞:*` の形(例 `shell(python:*)`)→
+///   detail が `接頭辞` で始まるか(ワイルドカードは CLI の仕様上 shell 専用なので、
+///   名前が "shell" でなければ常に不一致)
+/// - `名前(フィルタ)` でそれ以外(例 `shell(rm)`)→ detail の最初のトークン(空白区切り)が
+///   フィルタと完全一致するか
+fn tool_matches(pattern: &str, input: &PermissionInput) -> bool {
+    let (name, filter) = match pattern.split_once('(') {
+        Some((name, rest)) => (name, Some(rest.strip_suffix(')').unwrap_or(rest))),
+        None => (pattern, None),
+    };
+    if name != input.tool_name {
+        return false;
     }
+    let Some(filter) = filter else {
+        return true;
+    };
+    let detail = input.detail.as_deref().unwrap_or("");
+    if let Some(prefix) = filter.strip_suffix(":*") {
+        // CLI 仕様: "Wildcards are only supported for shell"
+        return name == "shell" && detail.starts_with(prefix);
+    }
+    detail.split_whitespace().next() == Some(filter)
 }
 
 /// `target` が `base` 配下かを正規化済み絶対パスで判定する(docs/architecture.md §7.3)。
@@ -102,6 +127,7 @@ mod tests {
         let s = settings(&dir);
         let input = PermissionInput {
             tool_name: "write".into(),
+            detail: None,
             write_path: Some(dir.join("report.md")),
         };
         assert_eq!(decide(&s, &input), Decision::Approve);
@@ -114,6 +140,7 @@ mod tests {
         let s = settings(&dir);
         let input = PermissionInput {
             tool_name: "write".into(),
+            detail: None,
             write_path: Some(dir.join("..").join("escape.md")),
         };
         assert_eq!(decide(&s, &input), Decision::Ask);
@@ -125,7 +152,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let s = settings(&dir);
         let input = PermissionInput {
-            tool_name: "shell(rm)".into(),
+            tool_name: "shell".into(),
+            detail: Some("rm -rf report.md".into()),
             write_path: Some(dir.join("x")),
         };
         assert_eq!(decide(&s, &input), Decision::Deny);
@@ -137,15 +165,55 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let s = settings(&dir);
         let input = PermissionInput {
-            tool_name: "shell(python)".into(),
+            tool_name: "shell".into(),
+            detail: Some("python script.py".into()),
             write_path: None,
         };
         assert_eq!(decide(&s, &input), Decision::Ask);
     }
 
     #[test]
-    fn wildcard_pattern_matches_prefix() {
-        assert!(tool_matches("shell(python:*", "shell(python:script.py)"));
-        assert!(!tool_matches("shell(python:*", "shell(node:x)"));
+    fn pattern_name_only_matches_regardless_of_detail() {
+        let input = PermissionInput { tool_name: "write".into(), detail: Some("何でも".into()), write_path: None };
+        assert!(tool_matches("write", &input));
+        let input_no_detail = PermissionInput { tool_name: "write".into(), detail: None, write_path: None };
+        assert!(tool_matches("write", &input_no_detail));
+    }
+
+    #[test]
+    fn pattern_name_only_does_not_match_different_kind() {
+        let input = PermissionInput { tool_name: "read".into(), detail: None, write_path: None };
+        assert!(!tool_matches("write", &input));
+    }
+
+    #[test]
+    fn shell_filter_without_wildcard_matches_first_token_exactly() {
+        let input = PermissionInput { tool_name: "shell".into(), detail: Some("rm -rf /tmp".into()), write_path: None };
+        assert!(tool_matches("shell(rm)", &input));
+
+        let not_exact = PermissionInput { tool_name: "shell".into(), detail: Some("rmdir /tmp".into()), write_path: None };
+        assert!(!tool_matches("shell(rm)", &not_exact), "先頭トークンの完全一致でなければマッチしない");
+    }
+
+    #[test]
+    fn shell_wildcard_filter_matches_command_prefix() {
+        let input = PermissionInput { tool_name: "shell".into(), detail: Some("python script.py".into()), write_path: None };
+        assert!(tool_matches("shell(python:*)", &input));
+
+        let other = PermissionInput { tool_name: "shell".into(), detail: Some("node x.js".into()), write_path: None };
+        assert!(!tool_matches("shell(python:*)", &other));
+    }
+
+    #[test]
+    fn wildcard_filter_is_rejected_for_non_shell_names() {
+        // CLI 仕様上ワイルドカードは shell 専用。write(python:*) のような組み合わせは常に不一致。
+        let input = PermissionInput { tool_name: "write".into(), detail: Some("python:* script.py".into()), write_path: None };
+        assert!(!tool_matches("write(python:*)", &input));
+    }
+
+    #[test]
+    fn different_tool_kind_never_matches_even_with_matching_filter_text() {
+        let input = PermissionInput { tool_name: "read".into(), detail: Some("rm".into()), write_path: None };
+        assert!(!tool_matches("shell(rm)", &input));
     }
 }

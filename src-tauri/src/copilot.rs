@@ -6,16 +6,22 @@
 // 「未観測」とあった tool.* / subagent.* もこのソース読みで確認済み。
 
 use crate::events::AppEvent;
-use github_copilot_sdk::handler::ApproveAllHandler;
+use crate::permissions;
+use github_copilot_sdk::handler::{PermissionHandler, PermissionResult};
 use github_copilot_sdk::session_events::{
     AssistantIntentData, AssistantMessageData, AssistantUsageData, SessionErrorData,
     SessionIdleData, SessionUsageInfoData, SubagentCompletedData, SubagentFailedData,
     SubagentStartedData, ToolExecutionCompleteData, ToolExecutionStartData,
 };
-use github_copilot_sdk::types::{CustomAgentConfig, MessageOptions, SessionConfig, SessionEvent};
+use github_copilot_sdk::types::{
+    CustomAgentConfig, MessageOptions, PermissionRequestData, PermissionRequestKind, RequestId,
+    SessionConfig, SessionEvent, SessionId,
+};
 use github_copilot_sdk::{CliProgram, Client, ClientOptions};
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -60,6 +66,200 @@ pub struct TaskSpec {
     pub working_directory: PathBuf,
     /// config.defaultModel。None なら SDK 既定に委ねる。
     pub session_model: Option<String>,
+    /// このエージェントの入出力設定・許可/拒否ツール(docs/architecture.md §7.1)。
+    pub rules: permissions::PermissionRules,
+    /// respond_permission コマンドと run_task の PermissionHandler を橋渡しする。
+    pub bridge: Arc<PermissionBridge>,
+}
+
+/// UI からの承認応答を届けるブリッジ。main.rs の respond_permission コマンドと共有する
+/// (AppState が保持し、start_task で TaskSpec に渡す)。
+pub struct PermissionBridge {
+    pending: std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
+}
+
+impl PermissionBridge {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self { pending: std::sync::Mutex::new(HashMap::new()) })
+    }
+
+    /// UI から届いた承認/拒否を該当タスクへ届ける。存在しない request_id はエラーにする
+    /// (docs/development.md §3: エラーを握りつぶさない)。
+    pub fn respond(&self, request_id: &str, approve: bool) -> Result<(), String> {
+        let tx = self
+            .pending
+            .lock()
+            .unwrap()
+            .remove(request_id)
+            .ok_or_else(|| format!("不明な承認要求です(既に応答済みか、対象タスクが終了しています): {request_id}"))?;
+        // 受信側(run_task の PermissionHandler)がタスク終了で既に消えていても、
+        // 送信失敗は握りつぶしてよい(完了直後の応答はタイミング差であり利用者側のエラーではない)。
+        let _ = tx.send(approve);
+        Ok(())
+    }
+
+    /// Ask になった要求ごとに応答待ちの受信側を登録する。
+    fn register(&self, request_id: String) -> tokio::sync::oneshot::Receiver<bool> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending.lock().unwrap().insert(request_id, tx);
+        rx
+    }
+
+    /// タスク終了時の後始末(run_task の最後で呼ぶ)。未応答分の oneshot は
+    /// Drop で自然にキャンセルされる(受信側の await は Err で解決する)。
+    fn clear(&self) {
+        self.pending.lock().unwrap().clear();
+    }
+}
+
+/// PermissionRequestData → PermissionInput への防御的変換。
+///
+/// SDK 実ソース(github-copilot-sdk-1.0.9/src/generated/session_events.rs)で確認した実際の
+/// ワイヤー形状: `extra["permissionRequest"]` 配下に kind ごとの詳細が入る。
+/// - write: `fileName`(パス。`path` ではない)
+/// - read: `path`
+/// - shell: `fullCommandText`(コマンド全文)、`possiblePaths`
+/// - mcp / custom-tool: `toolName`
+/// CLI バージョン差に備え、他の候補キーも保険として試す。
+/// 取れない情報があっても自動承認側には倒さない(write_path が None のままなら
+/// decide() の出力フォルダ自動承認は成立せず Ask に落ちる)。
+fn build_permission_input(data: &PermissionRequestData) -> permissions::PermissionInput {
+    let permission_request = data.extra.get("permissionRequest");
+    let kind_str = permission_kind_str(data.kind);
+
+    // ツール種別名: kind を基本にしつつ、mcp/custom-tool など kind だけでは区別できない
+    // ツールのパターン照合のために、より具体的な tool/toolName があれば優先する。
+    let tool_name = permission_request
+        .and_then(|pr| pr.get("toolName").or_else(|| pr.get("tool")))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or(kind_str);
+
+    // write_path は「書き込み先」の意味なので write kind に限定する。read kind にも
+    // 同名の "path" フィールド(読み込み対象)があり、区別せず拾うと出力フォルダの閲覧
+    // (read)が書き込みの自動承認(decide() の outputDir 判定)に誤って乗ってしまう
+    // (実機検証で確認: outputDir を view した read 要求が誤 Approve された)。
+    let write_path = if matches!(data.kind, Some(PermissionRequestKind::Write)) {
+        permission_request
+            .and_then(|pr| pr.get("fileName").or_else(|| pr.get("path")))
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+    } else {
+        None
+    };
+
+    let detail = permission_request
+        .and_then(|pr| {
+            pr.get("fullCommandText")
+                .or_else(|| pr.get("path"))
+                .or_else(|| pr.get("fileName"))
+                .or_else(|| pr.get("url"))
+                .or_else(|| pr.get("command"))
+                .or_else(|| pr.get("commandLine"))
+                .or_else(|| pr.get("arguments"))
+                .or_else(|| pr.get("intention"))
+        })
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    permissions::PermissionInput { tool_name, detail, write_path }
+}
+
+fn permission_kind_str(kind: Option<PermissionRequestKind>) -> String {
+    match kind {
+        Some(PermissionRequestKind::Shell) => "shell",
+        Some(PermissionRequestKind::Write) => "write",
+        Some(PermissionRequestKind::Read) => "read",
+        Some(PermissionRequestKind::Url) => "url",
+        Some(PermissionRequestKind::Mcp) => "mcp",
+        Some(PermissionRequestKind::CustomTool) => "custom-tool",
+        Some(PermissionRequestKind::Memory) => "memory",
+        Some(PermissionRequestKind::Hook) => "hook",
+        _ => "unknown",
+    }
+    .to_string()
+}
+
+/// UI 確認をはさむ自前の PermissionHandler(docs/architecture.md §7.1)。
+/// 判定は permissions::decide に委譲する。Ask になったものだけ PermissionRequested を
+/// emit して bridge 経由の応答を待つ。ユーザーが拒否したら abort_tx で run_task の
+/// select ループへ通知し、セッション全体を中断する(受け入れ条件7)。
+///
+/// PermissionHandler は #[async_trait] で定義されているが、その属性マクロを使うには
+/// async-trait クレートを新規に直接依存として追加する必要がある(SDK は再エクスポートして
+/// いない)。新規クレート追加は tauri-plugin-dialog 以外禁止のため、マクロが生成するのと
+/// 同じ `Pin<Box<dyn Future>>` を返す形を手で書く。
+struct UiPermissionHandler {
+    rules: permissions::PermissionRules,
+    bridge: Arc<PermissionBridge>,
+    sink: Arc<dyn Fn(AppEvent) + Send + Sync>,
+    /// ユーザーが拒否した際に run_task の select ループへ中断を伝える。
+    abort_tx: tokio::sync::mpsc::UnboundedSender<()>,
+}
+
+impl PermissionHandler for UiPermissionHandler {
+    fn handle<'life0, 'async_trait>(
+        &'life0 self,
+        session_id: SessionId,
+        request_id: RequestId,
+        data: PermissionRequestData,
+    ) -> Pin<Box<dyn Future<Output = PermissionResult> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            // 観測用: extra の実形を記録する(docs/sdk-notes.md「形は CLI バージョン依存」)。
+            eprintln!(
+                "[permission] session={session_id} request={request_id} extra={}",
+                serde_json::to_string(&data.extra).unwrap_or_else(|_| "<invalid json>".to_string())
+            );
+
+            let input = build_permission_input(&data);
+
+            match permissions::decide(&self.rules, &input) {
+                permissions::Decision::Deny => {
+                    PermissionResult::reject("agents.json の deniedTools により拒否".to_string())
+                }
+                permissions::Decision::Approve => PermissionResult::approve_once(),
+                permissions::Decision::Ask => {
+                    let detail = match &input.detail {
+                        Some(d) if !d.is_empty() => format!("{}: {d}", input.tool_name),
+                        _ => input.tool_name.clone(),
+                    };
+                    let request_id_str = request_id.to_string();
+                    (self.sink)(AppEvent::PermissionRequested {
+                        session_id: session_id.to_string(),
+                        request_id: request_id_str.clone(),
+                        permission_kind: input.tool_name.clone(),
+                        detail,
+                    });
+                    let rx = self.bridge.register(request_id_str);
+                    match rx.await {
+                        Ok(true) => PermissionResult::approve_once(),
+                        Ok(false) => {
+                            // タスク全体を止める(拒否は個々のツール呼び出しだけでなく実行全体の中断)。
+                            let _ = self.abort_tx.send(());
+                            PermissionResult::reject("ユーザーが拒否しました".to_string())
+                        }
+                        Err(_) => {
+                            // 応答が届く前に送信側が消えた(タスク終了等)。安全側に倒して拒否する。
+                            PermissionResult::reject("応答を受信できなかったため拒否しました".to_string())
+                        }
+                    }
+                }
+            }
+        })
+    }
+}
+
+/// セッション中断の理由。session.idle(aborted=true) 到達時に TaskCancelled / TaskFailed の
+/// どちらを emit するか決めるために EventContext が保持する(docs/sdk-notes.md「中断」節、
+/// 受け入れ条件7: 権限拒否による中断は失敗として扱う)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AbortReason {
+    UserCancel,
+    PermissionDenied,
 }
 
 /// CLI パスの解決(docs/architecture.md §1.2 の順): 設定値 → 環境変数 COPILOT_CLI_PATH → PATH 探索。
@@ -114,6 +314,9 @@ pub struct EventContext {
     /// tool_call_id → tool_name。tool.execution_complete の payload には tool_name が
     /// 無いため、tool.execution_start で覚えておいて補う。
     tool_names: HashMap<String, String>,
+    /// run_task が abort() を呼んだ理由。session.idle(aborted=true) 到達時に
+    /// TaskCancelled / TaskFailed のどちらを emit するか決めるために使う。
+    abort_reason: Option<AbortReason>,
 }
 
 impl Default for EventContext {
@@ -129,7 +332,14 @@ impl EventContext {
             last_main_message: String::new(),
             subagent_started_at: HashMap::new(),
             tool_names: HashMap::new(),
+            abort_reason: None,
         }
+    }
+
+    /// run_task が session.abort() を呼ぶ直前に理由を記録する。同一モジュール内の
+    /// run_task からのみ呼ぶため pub にしない(AbortReason 自体も非公開のため)。
+    fn set_abort_reason(&mut self, reason: AbortReason) {
+        self.abort_reason = Some(reason);
     }
 
     /// 1 SDK イベント → 0..n 個の AppEvent。対応表は docs/architecture.md §4。
@@ -283,7 +493,14 @@ impl EventContext {
     fn on_session_idle(&self, ev: &SessionEvent) -> Vec<AppEvent> {
         let aborted = ev.typed_data::<SessionIdleData>().and_then(|d| d.aborted).unwrap_or(false);
         if aborted {
-            return vec![AppEvent::TaskCancelled { session_id: self.session_id.clone() }];
+            return match self.abort_reason {
+                // 権限拒否による中断は「失敗」として扱う(受け入れ条件7)。
+                Some(AbortReason::PermissionDenied) => vec![AppEvent::TaskFailed {
+                    session_id: self.session_id.clone(),
+                    error: "権限が拒否されたため実行を中断しました".to_string(),
+                }],
+                _ => vec![AppEvent::TaskCancelled { session_id: self.session_id.clone() }],
+            };
         }
         vec![AppEvent::TaskCompleted {
             session_id: self.session_id.clone(),
@@ -334,14 +551,34 @@ pub async fn run_task(
         .await
         .map_err(|e| format!("Copilot CLI を起動できません: {e}"))?;
 
-    // TODO(ステップ4): permissions::decide を呼ぶ自前 PermissionHandler に差し替える。
-    // それまでは全承認固定(ApproveAllHandler)。
+    // sink を Arc<dyn Fn> にしておき、PermissionHandler(別スレッド/タスクで呼ばれる)にも
+    // 同じ関数を共有させる。
+    let sink: Arc<dyn Fn(AppEvent) + Send + Sync> = Arc::new(sink);
+    let bridge = spec.bridge.clone();
+    // ユーザーが権限要求を拒否した際に、PermissionHandler から select ループへ中断を伝える経路。
+    let (deny_abort_tx, mut deny_abort_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let permission_handler = Arc::new(UiPermissionHandler {
+        rules: spec.rules.clone(),
+        bridge: bridge.clone(),
+        sink: Arc::clone(&sink),
+        abort_tx: deny_abort_tx,
+    });
+
+    // rules.denied_tools のうち括弧を含まない単純名(例 "write")は SessionConfig の
+    // excluded_tools にも渡し、多重に防御する(docs/sdk-notes.md「ツール制限」節: excluded_tools
+    // は単純名のみ扱えるため、shell(rm) のようなパターン付きは PermissionHandler 側だけに委ねる)。
+    let simple_denied: Vec<String> =
+        spec.rules.denied_tools.iter().filter(|t| !t.contains('(')).cloned().collect();
+
     let custom_agents: Vec<CustomAgentConfig> = spec.agents.iter().map(to_custom_agent_config).collect();
     let mut config = SessionConfig::default()
-        .with_permission_handler(Arc::new(ApproveAllHandler))
+        .with_permission_handler(permission_handler)
         .with_custom_agents(custom_agents)
         .with_agent(spec.selected_agent_name.clone())
         .with_working_directory(spec.working_directory.clone());
+    if !simple_denied.is_empty() {
+        config = config.with_excluded_tools(simple_denied);
+    }
     if let Some(model) = &spec.session_model {
         config = config.with_model(model.clone());
     }
@@ -352,6 +589,7 @@ pub async fn run_task(
             if let Err(stop_err) = client.stop().await {
                 eprintln!("Client の停止に失敗しました: {stop_err}");
             }
+            bridge.clear();
             return Err(format!("セッションを作成できません: {e}"));
         }
     };
@@ -372,6 +610,9 @@ pub async fn run_task(
     // cancel は一度シグナルを受けたら abort() を呼ぶだけで、以降は select! の対象から外す
     // (oneshot::Receiver は完了後の再 poll を想定していないため)。
     let mut cancel_requested = false;
+    // 権限拒否による中断も同様に一度だけ(複数のツール呼び出しがそれぞれ拒否されても二重に
+    // abort() を呼ばない)。
+    let mut permission_abort_requested = false;
 
     let send_fut = session.send_and_wait(MessageOptions::new(spec.prompt).with_wait_timeout(SEND_AND_WAIT_TIMEOUT));
     tokio::pin!(send_fut);
@@ -383,6 +624,15 @@ pub async fn run_task(
                 // 中断の正道は abort()(disconnect ではない)。send_and_wait は
                 // 引き続き session.idle(aborted=true)で解決されるのを待つ
                 // (docs/sdk-notes.md「中断」節)。
+                ctx.set_abort_reason(AbortReason::UserCancel);
+                if let Err(e) = session.abort().await {
+                    eprintln!("セッションの中断に失敗しました: {e}");
+                }
+            }
+            _ = deny_abort_rx.recv(), if !permission_abort_requested => {
+                permission_abort_requested = true;
+                // 受け入れ条件7: 権限拒否は実行全体の中断につながる。
+                ctx.set_abort_reason(AbortReason::PermissionDenied);
                 if let Err(e) = session.abort().await {
                     eprintln!("セッションの中断に失敗しました: {e}");
                 }
@@ -432,6 +682,8 @@ pub async fn run_task(
     if let Err(e) = client.stop().await {
         eprintln!("Client の停止に失敗しました: {e}");
     }
+    // 未応答の承認要求が残っていれば破棄する(oneshot の Drop で受信側は自然にキャンセルされる)。
+    bridge.clear();
 
     match outcome {
         Outcome::Completed => Ok(()),

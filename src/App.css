@@ -68,6 +68,68 @@ body {
 .muted { color: #777; }
 .error { color: #b00020; }
 
+.badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 11px;
+  color: #8a5a00;
+  background: #fff3cd;
+  border-radius: 3px;
+}
+
+.config-form {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid #eee;
+}
+
+.config-form h3 {
+  font-size: 12px;
+  color: #555;
+  margin-bottom: 6px;
+}
+
+.config-form label {
+  display: block;
+  font-size: 12px;
+  color: #555;
+  margin-bottom: 6px;
+}
+
+.config-form input[type="text"] {
+  width: 100%;
+  font: inherit;
+  padding: 4px;
+  margin-top: 2px;
+}
+
+.config-form .folder-row {
+  display: flex;
+  gap: 4px;
+}
+
+.config-form .folder-row input {
+  flex: 1;
+}
+
+.config-form .checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.permission-dialog {
+  margin-top: 4px;
+  padding: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #fff3cd;
+  border: 1px solid #e0c060;
+  border-radius: 4px;
+}
+
 .prompt-input {
   width: 100%;
   font: inherit;

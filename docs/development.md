@@ -64,10 +64,11 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin smoke
   `.agent.md` のフルパース(tools/model/本文)→ `CustomAgentConfig` 詰め替え → `with_agent` で選択実行。
   選択外の定義も委任候補としてセッションに渡す。中断は `Session::abort()` ベースに切替済み。
   ヘッドレス検証は `cargo run --bin step3_check`(通常完了+中断の 2 ラウンド)
-- [ ] **ステップ4: 入出力設定と権限制御**
-  agents.json の読み書き(実装済み: `config.rs`)、設定画面(フォルダ選択に
-  `tauri-plugin-dialog` を追加)、権限判定(実装済み: `permissions.rs`)の SDK 接続
-  (`PermissionHandler` トレイト実装)。境界ケースで自動承認を確認
+- [x] **ステップ4: 入出力設定と権限制御**(2026-08-12 完了)
+  UiPermissionHandler(decide 接続・UI 承認ブリッジ・拒否時 abort)、設定画面(tauri-plugin-dialog)、
+  CLI 記法のパターン照合(`shell(python:*)` 等)。境界ケースは `cargo run --bin step4_check` で
+  実機3ラウンド検証済み(自動承認 / Ask→拒否で中断+ファイル無し / Ask→承認)。
+  権限要求の実形(fileName / fullCommandText)は sdk-notes.md に記録
 - [ ] **ステップ5: ツリー表示**
   `agent_id` を使ったツリー構築と描画。サブエージェントが実際に起動するプロンプトで確認
 - [ ] **ステップ6: 履歴**

@@ -10,7 +10,18 @@
 
 #[path = "../events.rs"]
 mod events;
+// copilot.rs が use crate::permissions(内部で crate::config::AgentSettings を使う)を
+// 要求するため、このバイナリでも両方を共有する必要がある。config.rs のうち
+// AgentSettings 以外(data_dir 等)はこのバイナリでは未使用になるため allow(dead_code)。
+#[path = "../config.rs"]
+#[allow(dead_code)]
+mod config;
+#[path = "../permissions.rs"]
+mod permissions;
+// このバイナリは権限確認フローを試験しないため PermissionBridge::respond は未使用
+// (config と同じ理由で allow)。
 #[path = "../copilot.rs"]
+#[allow(dead_code)]
 mod copilot;
 
 use events::AppEvent;
@@ -56,6 +67,8 @@ async fn main() {
         selected_agent_name: "default".to_string(),
         working_directory: std::env::temp_dir(),
         session_model: None,
+        rules: config::AgentSettings::default(),
+        bridge: copilot::PermissionBridge::new(),
     };
     let run = tokio::spawn(copilot::run_task(cli_path, spec, cancel_rx, sink));
 

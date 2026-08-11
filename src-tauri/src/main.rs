@@ -6,8 +6,6 @@ mod config;
 mod copilot;
 mod events;
 mod history;
-// ステップ4(権限制御)で使用開始。使い始めたら allow を外すこと
-#[allow(dead_code)]
 mod permissions;
 
 use config::AgentSettings;
@@ -33,6 +31,9 @@ struct AppState {
     data_dir: Result<PathBuf, String>,
     // MAX_CONCURRENT_TASKS == 1 の間は Option で足りる。
     running: Mutex<Option<RunningTask>>,
+    /// respond_permission コマンドと copilot::run_task の PermissionHandler を橋渡しする
+    /// (docs/architecture.md §7.1)。
+    bridge: std::sync::Arc<copilot::PermissionBridge>,
 }
 
 impl AppState {
@@ -141,6 +142,10 @@ fn start_task(app: tauri::AppHandle, state: State<AppState>, agent_id: String, p
     // フォールバック付き上書き)により、エージェント定義の model が実質最優先になる。
     // ここで渡す config.defaultModel はその親(フォールバック先)。優先順位の明文化は
     // docs/open-questions.md #3 が未決のため、確定させない(暫定コメントとして残す)。
+    // rules は agents.json の該当エージェント設定から構成する。未設定なら既定
+    // (allowed/denied 空、output_dir 無し、auto_approve true。docs/architecture.md §7.1)。
+    let rules = agents_cfg.agents.get(&agent_id).cloned().unwrap_or_default();
+
     let spec = copilot::TaskSpec {
         prompt,
         agent_id: agent_id.clone(),
@@ -148,6 +153,8 @@ fn start_task(app: tauri::AppHandle, state: State<AppState>, agent_id: String, p
         selected_agent_name: selected.name,
         working_directory,
         session_model: cfg.default_model.clone(),
+        rules,
+        bridge: state.bridge.clone(),
     };
 
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
@@ -216,15 +223,18 @@ fn cancel_task(state: State<AppState>, session_id: String) -> Result<(), String>
 }
 
 #[tauri::command]
-fn respond_permission(_request_id: String, _decision: bool) -> Result<(), String> {
-    Err("未実装: ステップ4で実装します".into())
+fn respond_permission(state: State<AppState>, request_id: String, decision: bool) -> Result<(), String> {
+    state.bridge.respond(&request_id, decision)
 }
 
 fn main() {
     tauri::Builder::default()
+        // フォルダ選択ダイアログ用(docs/requirements.md §3.4)。
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             data_dir: config::data_dir(),
             running: Mutex::new(None),
+            bridge: copilot::PermissionBridge::new(),
         })
         .invoke_handler(tauri::generate_handler![
             list_agents,

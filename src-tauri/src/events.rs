@@ -49,8 +49,6 @@ pub enum AppEvent {
         tool_name: String,
         success: bool,
     },
-    // ステップ4(権限制御)で PermissionHandler 実装から構築する。使い始めたら allow を外すこと
-    #[allow(dead_code)]
     PermissionRequested {
         session_id: String,
         request_id: String,

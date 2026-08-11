@@ -10,6 +10,9 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# フォルダ選択ダイアログ用(docs/requirements.md §3.4)。2.7.2 は 2026-08-12 に crates.io で確認
+# した最新版(docs/sdk-notes.md 参照)。禁止リストの例外として明示的に許可されているクレート。
+tauri-plugin-dialog = "2"
 # シリアライズ(設定ファイル・IPC・イベントすべてで使用)
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

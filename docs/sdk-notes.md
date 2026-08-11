@@ -131,9 +131,19 @@ session.background_tasks_changed
 - `PermissionHandler::handle(&self, session_id, request_id, data: PermissionRequestData) -> PermissionResult`(async)
 - `PermissionResult::approve_once()` / `reject(feedback)` / `user_not_available()` で応答
 - `PermissionRequestData`: 型付きは `kind: Option<PermissionRequestKind>`(shell/write/read/url/mcp/…)と
-  `tool_call_id` 程度。**具体的なツール名や書き込み先パスは `extra: Value` の中**:
-  `extra["permissionRequest"]["path"]`(SDK のテストで実証)、ツール名は `extra["permissionRequest"]` 配下
-  (形は CLI バージョン依存と明記あり)。**防御的にパースし、取れなければ Ask に倒すこと**
+  `tool_call_id` 程度。**具体的なツール名や書き込み先パスは `extra: Value` の中**。
+  **防御的にパースし、取れなければ Ask に倒すこと**
+- `extra["permissionRequest"]` の実形(2026-08-12、CLI 1.0.79 でステップ4実機観測):
+  - read: `{kind, path, intention, toolCallId}`
+  - write: `{kind, fileName, newFileContents, diff, intention, canOfferSessionApproval, toolCallId}`
+    — **書き込み先は `fileName`(`path` ではない。`path` は read 用)**
+  - shell: `{kind, fullCommandText, commandSegments, commands, hasWriteFileRedirection, possiblePaths, possibleUrls, intention, toolCallId}`
+    — コマンド文字列は `fullCommandText`
+  - 実装(copilot.rs build_permission_input): write_path は **kind==write のときだけ** fileName から取る
+    (read の path を無条件に write_path に入れると出力フォルダ自動承認に誤流入する — 実機で発見・修正済みのバグ)
+- 挙動メモ: モデルはファイル作成に write ツールでなくシェル(Set-Content 等)を選ぶことがある。
+  その場合は shell として Ask に倒れる(安全側)。出力フォルダ自動承認を効かせたい業務エージェントは
+  Instructions に「ファイル出力は write ツールで行う」と明記すること(agents/ のサンプル参照)
 
 ### 中断
 

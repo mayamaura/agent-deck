@@ -52,6 +52,20 @@ fn default_true() -> bool {
     true
 }
 
+/// エージェント未設定時の既定値(docs/architecture.md §7.1: allowed/denied 空、
+/// output_dir 無し、auto_approve true)。start_task が rules 構築に使う。
+impl Default for AgentSettings {
+    fn default() -> Self {
+        Self {
+            input_dir: None,
+            output_dir: None,
+            allowed_tools: Vec::new(),
+            denied_tools: Vec::new(),
+            auto_approve_write_in_output_dir: true,
+        }
+    }
+}
+
 /// exe と同階層の data/ を返す(docs/architecture.md §6.1、ポータブル運用)。
 /// 書き込み不可の場所なら Err — 呼び出し側で起動エラーとして UI に出すこと。
 pub fn data_dir() -> Result<PathBuf, String> {
