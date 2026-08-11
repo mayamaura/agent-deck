@@ -1,0 +1,82 @@
+/* 情報密度優先・装飾最小(docs/requirements.md §3.5)。フォント 13px 以上。 */
+* {
+  box-sizing: border-box;
+  margin: 0;
+}
+
+body {
+  font-family: "Yu Gothic UI", "Meiryo UI", sans-serif;
+  font-size: 13px;
+  color: #1a1a1a;
+  background: #f5f5f5;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 240px 1fr 280px;
+  grid-template-rows: 1fr 200px;
+  grid-template-areas:
+    "agents run detail"
+    "agents history history";
+  height: 100vh;
+  gap: 1px;
+  background: #ccc;
+}
+
+.pane {
+  background: #fff;
+  padding: 8px;
+  overflow-y: auto;
+}
+
+.pane h2 {
+  font-size: 13px;
+  color: #555;
+  margin-bottom: 6px;
+}
+
+.agents { grid-area: agents; }
+.run { grid-area: run; }
+.detail { grid-area: detail; }
+.history { grid-area: history; }
+
+.agents ul {
+  list-style: none;
+  padding: 0;
+}
+
+.agents button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 13px;
+  border-radius: 4px;
+}
+
+.agents button:hover { background: #eef3fb; }
+.agents button.selected { background: #dbe7f8; }
+
+.agents button span {
+  display: block;
+  font-size: 12px;
+}
+
+.muted { color: #777; }
+.error { color: #b00020; }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th, td {
+  text-align: left;
+  padding: 3px 8px;
+  border-bottom: 1px solid #eee;
+}
+
+th { color: #555; font-weight: normal; }

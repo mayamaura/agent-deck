@@ -1,0 +1,21 @@
+# バージョンは 2026-08-12 に crates.io で確認(docs/sdk-notes.md 参照)
+[package]
+name = "agent-deck"
+version = "0.1.0"
+description = "Copilot エージェントに定型業務を依頼し、稼働状況をリアルタイム表示するデスクトップアプリ"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+# シリアライズ(設定ファイル・IPC・イベントすべてで使用)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# docs/architecture.md §1.2 により bundled-cli は無効化。
+# 1.0.9 は 2026-08-12 に crates.io で確認した最新安定版(docs/sdk-notes.md 参照)
+github-copilot-sdk = { version = "1.0.9", default-features = false }
+# smoke バイナリの #[tokio::main] 用。SDK が非同期 API(io/sync/process/net)を要求するため tokio ランタイムが必要
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
