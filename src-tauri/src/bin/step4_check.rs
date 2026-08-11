@@ -25,7 +25,11 @@ mod events;
 mod config;
 #[path = "../permissions.rs"]
 mod permissions;
+// このバイナリは run_task の RunOutcome を素通し(Ok(Ok(_)))するだけで各フィールドは
+// 読まないため allow(dead_code)(config と同じ理由。docs/development.md ステップ6で
+// RunOutcome を追加した際に判明)。
 #[path = "../copilot.rs"]
+#[allow(dead_code)]
 mod copilot;
 
 use config::AgentSettings;
@@ -151,8 +155,10 @@ async fn run_task_and_collect(
     }
 
     match run.await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => eprintln!("run_task がエラーを返しました(拒否ラウンドでは想定内): {e}"),
+        // 拒否ラウンドも TaskStarted 後の終端は Ok(RunOutcome{status: Failed}) になる
+        // (docs/development.md ステップ6: 開始後は Err を返さない設計に変更)。
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => eprintln!("run_task がエラーを返しました(開始前の失敗): {e}"),
         Err(e) => eprintln!("run_task の join に失敗しました: {e}"),
     }
     outcome

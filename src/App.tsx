@@ -176,6 +176,7 @@ export default function App() {
 
   // 応答済みの権限要求 requestId(docs/tree.ts の buildTree 第2引数)。
   const [respondedRequestIds, setRespondedRequestIds] = useState<Set<string>>(new Set());
+  const [outputFolderError, setOutputFolderError] = useState<string | null>(null);
   // 行ごとの経過時間計算用の開始時刻(受信時刻, epoch ms)。key は tree.ts の AgentRow.key。
   const [rowStartedAt, setRowStartedAt] = useState<Record<string, number>>({});
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -237,6 +238,10 @@ export default function App() {
         setRowStartedAt((prev) => ({ ...prev, [ev.agentId]: Date.now() }));
       } else if (ev.kind === "taskCompleted" || ev.kind === "taskFailed" || ev.kind === "taskCancelled") {
         setRunning(false);
+        // 履歴ペインをこのタスクの結果で更新する(docs/requirements.md 受け入れ条件10)。
+        invoke<HistoryEntry[]>("list_history", { limit: 20 })
+          .then(setHistory)
+          .catch((e) => setError(String(e)));
       }
     }).then((fn) => {
       unlisten = fn;
@@ -298,6 +303,16 @@ export default function App() {
       setSaveStatus("✅ 保存しました");
     } catch (e) {
       setSaveStatus(`⚠ 保存に失敗しました: ${e}`);
+    }
+  }
+
+  async function handleOpenOutputFolder() {
+    if (!selected) return;
+    setOutputFolderError(null);
+    try {
+      await invoke("open_output_folder", { agentId: selected });
+    } catch (e) {
+      setOutputFolderError(String(e));
     }
   }
 
@@ -467,6 +482,14 @@ export default function App() {
             </ul>
           </div>
         )}
+        {selected && (
+          <div className="run-controls">
+            <button type="button" onClick={handleOpenOutputFolder}>
+              出力フォルダを開く
+            </button>
+          </div>
+        )}
+        {outputFolderError && <p className="error">⚠ {outputFolderError}</p>}
         <h3>ログ</h3>
         <ul className="event-log">
           {events.map((e, i) => (
@@ -488,6 +511,7 @@ export default function App() {
                 <th>エージェント</th>
                 <th>状態</th>
                 <th>所要</th>
+                <th>トークン</th>
               </tr>
             </thead>
             <tbody>
@@ -497,8 +521,11 @@ export default function App() {
                   <td>{h.agentId}</td>
                   <td>
                     {h.status === "completed" ? "✅ 完了" : h.status === "failed" ? "❌ 失敗" : "⏹ 中断"}
+                    {/* 完成品か途中で止まったものかを判別できるようにする(docs/architecture.md §8.3)。 */}
+                    {h.status !== "completed" && <div className="muted">⚠ 出力は未完成の可能性</div>}
                   </td>
                   <td>{Math.round(h.durationMs / 1000)} 秒</td>
+                  <td>{h.totalTokens != null ? h.totalTokens : "—"}</td>
                 </tr>
               ))}
             </tbody>

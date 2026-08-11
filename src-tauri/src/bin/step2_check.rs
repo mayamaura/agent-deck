@@ -87,7 +87,7 @@ async fn main() {
     }
 
     match run.await {
-        Ok(Ok(())) => {}
+        Ok(Ok(_)) => {}
         Ok(Err(e)) => eprintln!("run_task が失敗を返しました: {e}"),
         Err(e) => eprintln!("run_task の join に失敗しました: {e}"),
     }

@@ -133,7 +133,7 @@ async fn run_round1(cli_path: &PathBuf, greeter: &agents::AgentDefinition, agent
         }
     }
     match run.await {
-        Ok(Ok(())) => {}
+        Ok(Ok(_)) => {}
         Ok(Err(e)) => {
             eprintln!("run_task が失敗を返しました: {e}");
             return false;
@@ -210,7 +210,7 @@ async fn run_round2(cli_path: PathBuf, greeter: &agents::AgentDefinition, agent_
         }
     }
     match run.await {
-        Ok(Ok(())) => {}
+        Ok(Ok(_)) => {}
         Ok(Err(e)) => {
             eprintln!("run_task が失敗を返しました: {e}");
             return false;

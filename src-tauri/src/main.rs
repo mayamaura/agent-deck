@@ -146,6 +146,8 @@ fn start_task(app: tauri::AppHandle, state: State<AppState>, agent_id: String, p
     // (allowed/denied 空、output_dir 無し、auto_approve true。docs/architecture.md §7.1)。
     let rules = agents_cfg.agents.get(&agent_id).cloned().unwrap_or_default();
 
+    // 履歴書き込み用に、TaskSpec へ move する前に複製しておく(docs/development.md ステップ6)。
+    let prompt_for_history = prompt.clone();
     let spec = copilot::TaskSpec {
         prompt,
         agent_id: agent_id.clone(),
@@ -189,8 +191,24 @@ fn start_task(app: tauri::AppHandle, state: State<AppState>, agent_id: String, p
             }
         };
 
-        if let Err(e) = copilot::run_task(cli_path, spec, cancel_rx, sink).await {
-            eprintln!("タスクの実行に失敗しました: {e}");
+        match copilot::run_task(cli_path, spec, cancel_rx, sink).await {
+            Ok(outcome) => {
+                // 監査ログ: 履歴ファイルに残らない summary(完了時の最終メッセージ/失敗時のエラー文)
+                // をここで記録しておく。
+                eprintln!(
+                    "[history] session={} status={:?} summary={}",
+                    outcome.session_id, outcome.status, outcome.summary
+                );
+                // タスク自体は(成功/失敗/中断のいずれでも)終わっているため、追記に失敗しても
+                // TaskFailed イベントは出さず eprintln に留める(UI にはもう出しようがない)。
+                let entry = history::entry_from_outcome(&agent_id, &prompt_for_history, &outcome);
+                if let Err(e) = history::append(&data_dir, &entry) {
+                    eprintln!("履歴の追記に失敗しました: {e}");
+                }
+            }
+            // TaskStarted 前(セッション起動失敗等)の失敗。履歴の主キーである session_id が
+            // 無いため履歴対象外(copilot::run_task のコメント参照)。
+            Err(e) => eprintln!("タスクの実行に失敗しました: {e}"),
         }
 
         if let Some(state) = app_handle.try_state::<AppState>() {

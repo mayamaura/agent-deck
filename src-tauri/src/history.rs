@@ -1,3 +1,4 @@
+use crate::copilot::{RunOutcome, TaskStatus};
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -28,8 +29,32 @@ pub struct SubagentRecord {
     pub duration_ms: u64,
 }
 
-// ステップ6(履歴)で使用開始。使い始めたら allow を外すこと
-#[allow(dead_code)]
+/// RunOutcome(copilot::run_task の戻り値)から履歴 1 行分を組み立てる。
+/// copilot::RunOutcome を引数に取るが、SDK の型ではなくアプリ独自の型なのでモジュール境界として許容する
+/// (docs/architecture.md §4: SDK の型を直接流さない、の対象は SDK 型そのもの)。
+pub fn entry_from_outcome(agent_id: &str, prompt: &str, outcome: &RunOutcome) -> HistoryEntry {
+    let status = match outcome.status {
+        TaskStatus::Completed => "completed",
+        TaskStatus::Failed => "failed",
+        TaskStatus::Cancelled => "cancelled",
+    };
+    HistoryEntry {
+        session_id: outcome.session_id.clone(),
+        agent_id: agent_id.to_string(),
+        prompt: prompt.to_string(),
+        started_at: outcome.started_at.clone(),
+        duration_ms: outcome.duration_ms,
+        status: status.to_string(),
+        output_files: outcome.output_files.clone(),
+        total_tokens: outcome.total_tokens,
+        subagents: outcome
+            .subagents
+            .iter()
+            .map(|s| SubagentRecord { name: s.name.clone(), duration_ms: s.duration_ms })
+            .collect(),
+    }
+}
+
 pub fn append(data_dir: &Path, entry: &HistoryEntry) -> Result<(), String> {
     let path = data_dir.join("history.jsonl");
     let line = serde_json::to_string(entry).map_err(|e| e.to_string())?;

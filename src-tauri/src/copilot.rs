@@ -195,6 +195,10 @@ struct UiPermissionHandler {
     sink: Arc<dyn Fn(AppEvent) + Send + Sync>,
     /// ユーザーが拒否した際に run_task の select ループへ中断を伝える。
     abort_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    /// 承認された(自動承認・ユーザー承認とも)書き込み先の絶対パスを集める共有コレクタ。
+    /// run_task が作成し、EventContext とも同じ Arc を共有する(RunOutcome.output_files /
+    /// TaskCompleted.output_files に同じ一覧を使うため。docs/development.md ステップ6)。
+    output_files: Arc<std::sync::Mutex<Vec<PathBuf>>>,
 }
 
 impl PermissionHandler for UiPermissionHandler {
@@ -221,7 +225,12 @@ impl PermissionHandler for UiPermissionHandler {
                 permissions::Decision::Deny => {
                     PermissionResult::reject("agents.json の deniedTools により拒否".to_string())
                 }
-                permissions::Decision::Approve => PermissionResult::approve_once(),
+                permissions::Decision::Approve => {
+                    if let Some(path) = &input.write_path {
+                        self.output_files.lock().unwrap().push(path.clone());
+                    }
+                    PermissionResult::approve_once()
+                }
                 permissions::Decision::Ask => {
                     let detail = match &input.detail {
                         Some(d) if !d.is_empty() => format!("{}: {d}", input.tool_name),
@@ -236,7 +245,12 @@ impl PermissionHandler for UiPermissionHandler {
                     });
                     let rx = self.bridge.register(request_id_str);
                     match rx.await {
-                        Ok(true) => PermissionResult::approve_once(),
+                        Ok(true) => {
+                            if let Some(path) = &input.write_path {
+                                self.output_files.lock().unwrap().push(path.clone());
+                            }
+                            PermissionResult::approve_once()
+                        }
                         Ok(false) => {
                             // タスク全体を止める(拒否は個々のツール呼び出しだけでなく実行全体の中断)。
                             let _ = self.abort_tx.send(());
@@ -317,6 +331,13 @@ pub struct EventContext {
     /// run_task が abort() を呼んだ理由。session.idle(aborted=true) 到達時に
     /// TaskCancelled / TaskFailed のどちらを emit するか決めるために使う。
     abort_reason: Option<AbortReason>,
+    /// assistant.usage の input_tokens+output_tokens の総和(取れた分)。RunOutcome.total_tokens に使う。
+    total_tokens: Option<u64>,
+    /// subagent.completed/failed で確定した (name, duration_ms) の列。RunOutcome.subagents に使う。
+    subagent_outcomes: Vec<SubagentOutcome>,
+    /// 承認された書き込み先の共有コレクタ。run_task が UiPermissionHandler と同じ Arc を渡す
+    /// (TaskCompleted.output_files に使う)。
+    output_files: Arc<std::sync::Mutex<Vec<PathBuf>>>,
 }
 
 impl Default for EventContext {
@@ -333,6 +354,9 @@ impl EventContext {
             subagent_started_at: HashMap::new(),
             tool_names: HashMap::new(),
             abort_reason: None,
+            total_tokens: None,
+            subagent_outcomes: Vec::new(),
+            output_files: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -419,6 +443,7 @@ impl EventContext {
             .unwrap_or(0);
         // on_subagent_started と同じ式(同じ agent_name なら同じ行に確定する)。
         let agent_id = ev.agent_id.clone().unwrap_or_else(|| data.agent_name.clone());
+        self.subagent_outcomes.push(SubagentOutcome { name: data.agent_name.clone(), duration_ms });
         vec![AppEvent::SubagentCompleted {
             session_id: self.session_id.clone(),
             agent_id,
@@ -432,7 +457,13 @@ impl EventContext {
         let Some(data) = ev.typed_data::<SubagentFailedData>() else {
             return Vec::new();
         };
-        self.subagent_started_at.remove(&data.tool_call_id);
+        let started_at = self.subagent_started_at.remove(&data.tool_call_id);
+        let duration_ms = data
+            .duration_ms
+            .map(|v| v.max(0) as u64)
+            .or_else(|| started_at.map(|s| s.elapsed().as_millis() as u64))
+            .unwrap_or(0);
+        self.subagent_outcomes.push(SubagentOutcome { name: data.agent_name.clone(), duration_ms });
         let agent_id = ev.agent_id.clone().unwrap_or_else(|| data.agent_name.clone());
         vec![AppEvent::SubagentFailed {
             session_id: self.session_id.clone(),
@@ -474,15 +505,18 @@ impl EventContext {
         }]
     }
 
-    fn on_assistant_usage(&self, ev: &SessionEvent) -> Vec<AppEvent> {
+    fn on_assistant_usage(&mut self, ev: &SessionEvent) -> Vec<AppEvent> {
         let Some(data) = ev.typed_data::<AssistantUsageData>() else {
             return Vec::new();
         };
         // assistant.usage には current_tokens/token_limit が無いため、取れる input+output で代用。
-        let current = data.input_tokens.unwrap_or(0) + data.output_tokens.unwrap_or(0);
+        let current = (data.input_tokens.unwrap_or(0) + data.output_tokens.unwrap_or(0)).max(0) as u64;
+        // RunOutcome.total_tokens は「呼び出しごとの input+output の総和」(docs/development.md
+        // ステップ6)。session.usage_info の current_tokens(単発の現在値)とは別物。
+        self.total_tokens = Some(self.total_tokens.unwrap_or(0) + current);
         vec![AppEvent::UsageUpdated {
             session_id: self.session_id.clone(),
-            current_tokens: current.max(0) as u64,
+            current_tokens: current,
             token_limit: None,
         }]
     }
@@ -528,8 +562,7 @@ impl EventContext {
         vec![AppEvent::TaskCompleted {
             session_id: self.session_id.clone(),
             summary: self.last_main_message.clone(),
-            // ステップ6(履歴接続)で出力ファイル一覧を埋める。
-            output_files: Vec::new(),
+            output_files: dedup_output_files(&self.output_files),
         }]
     }
 
@@ -562,14 +595,73 @@ enum Outcome {
     Failed(String),
 }
 
+/// 承認された書き込み先パスの重複除去済み絶対パス文字列一覧
+/// (UiPermissionHandler / EventContext が共有する Arc<Mutex<Vec<PathBuf>>> から作る)。
+fn dedup_output_files(files: &std::sync::Mutex<Vec<PathBuf>>) -> Vec<String> {
+    let mut list: Vec<String> = files.lock().unwrap().iter().map(|p| p.display().to_string()).collect();
+    list.sort();
+    list.dedup();
+    list
+}
+
+/// run_task 1 回分の結果(docs/development.md ステップ6)。history::entry_from_outcome の入力になる。
+/// タスク開始(TaskStarted emit)後に確定した終端状態のみを表す。開始前の失敗は
+/// Err(String) のまま(履歴対象外。理由は run_task 側のコメント参照)。
+#[derive(Debug, Clone)]
+pub struct RunOutcome {
+    pub session_id: String,
+    pub status: TaskStatus,
+    /// 完了時の最終メッセージ(失敗時はエラー文)。
+    pub summary: String,
+    /// 承認された書き込み先の絶対パス(重複除去済み)。
+    pub output_files: Vec<String>,
+    /// assistant.usage の input_tokens+output_tokens の総和(取れた分)。
+    pub total_tokens: Option<u64>,
+    pub subagents: Vec<SubagentOutcome>,
+    /// TaskStarted と同じ値。
+    pub started_at: String,
+    pub duration_ms: u64,
+}
+
+/// RunOutcome.status。SDK の型はここに持ち込まない(history.rs で "completed"/"failed"/"cancelled" に変換)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskStatus {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone)]
+pub struct SubagentOutcome {
+    pub name: String,
+    pub duration_ms: u64,
+}
+
+/// TaskCompleted/TaskFailed/TaskCancelled のときだけ (status, summary) を返す。
+/// run_task が select ループの2箇所(drain / 通常受信)で終端状態を拾うための小さな判別ヘルパー。
+fn terminal_outcome_of(ev: &AppEvent) -> Option<(TaskStatus, String)> {
+    match ev {
+        AppEvent::TaskCompleted { summary, .. } => Some((TaskStatus::Completed, summary.clone())),
+        AppEvent::TaskFailed { error, .. } => Some((TaskStatus::Failed, error.clone())),
+        AppEvent::TaskCancelled { .. } => Some((TaskStatus::Cancelled, String::new())),
+        _ => None,
+    }
+}
+
 /// タスク 1 本の実行(Client 起動 → セッション作成 → 購読 → send_and_wait → 後始末)。
 /// sink には変換済み AppEvent を渡すだけで、emit するのは呼び出し側の責務(main.rs)。
+///
+/// 戻り値は Result<RunOutcome, String> だが、Err になるのは TaskStarted を emit する前
+/// (Client 起動・セッション作成)の失敗のみ。開始後に判明した失敗・中断は
+/// Ok(RunOutcome { status: Failed/Cancelled, .. }) として返す(呼び出し側の main.rs が
+/// Ok/Err を問わず同じ経路で履歴に書けるようにするため。開始前の失敗はセッションが
+/// 存在せず履歴の主キーである session_id が無いため、そもそも履歴対象外)。
 pub async fn run_task(
     cli_path: PathBuf,
     spec: TaskSpec,
     mut cancel: tokio::sync::oneshot::Receiver<()>,
     sink: impl Fn(AppEvent) + Send + Sync + 'static,
-) -> Result<(), String> {
+) -> Result<RunOutcome, String> {
     let client = Client::start(ClientOptions::new().with_program(CliProgram::Path(cli_path)))
         .await
         .map_err(|e| format!("Copilot CLI を起動できません: {e}"))?;
@@ -580,11 +672,15 @@ pub async fn run_task(
     let bridge = spec.bridge.clone();
     // ユーザーが権限要求を拒否した際に、PermissionHandler から select ループへ中断を伝える経路。
     let (deny_abort_tx, mut deny_abort_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    // 承認された書き込み先の共有コレクタ。UiPermissionHandler と EventContext の両方に
+    // 同じ Arc を渡す(RunOutcome.output_files / TaskCompleted.output_files を一致させるため)。
+    let output_files: Arc<std::sync::Mutex<Vec<PathBuf>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
     let permission_handler = Arc::new(UiPermissionHandler {
         rules: spec.rules.clone(),
         bridge: bridge.clone(),
         sink: Arc::clone(&sink),
         abort_tx: deny_abort_tx,
+        output_files: Arc::clone(&output_files),
     });
 
     // rules.denied_tools のうち括弧を含まない単純名(例 "write")は SessionConfig の
@@ -618,18 +714,25 @@ pub async fn run_task(
     };
 
     let session_id = session.id().to_string();
+    let started_at = format_rfc3339_now();
+    // RunOutcome.duration_ms は「開始時刻からの所要」(docs/development.md ステップ6)。
+    let task_start = Instant::now();
     sink(AppEvent::TaskStarted {
         session_id: session_id.clone(),
         agent_id: spec.agent_id,
-        started_at: format_rfc3339_now(),
+        started_at: started_at.clone(),
     });
 
     let mut ctx = EventContext::new();
     ctx.session_id = session_id.clone();
+    ctx.output_files = Arc::clone(&output_files);
     let mut events = session.subscribe();
     // session.error 由来の TaskFailed、または aborted な session.idle 由来の TaskCancelled が
     // convert() 側で既に送られたかどうか。送られていれば run_task 側の失敗フォールバックで重複させない。
     let mut terminal_sent = false;
+    // convert() が終端 AppEvent を出した際の (status, summary)。RunOutcome の元になる。
+    let mut terminal_status: Option<TaskStatus> = None;
+    let mut terminal_summary = String::new();
     // cancel は一度シグナルを受けたら abort() を呼ぶだけで、以降は select! の対象から外す
     // (oneshot::Receiver は完了後の再 poll を想定していないため)。
     let mut cancel_requested = false;
@@ -665,11 +768,10 @@ pub async fn run_task(
                     match tokio::time::timeout(DRAIN_TIMEOUT, events.recv()).await {
                         Ok(Ok(event)) => {
                             for app_event in ctx.convert(&event) {
-                                if matches!(
-                                    app_event,
-                                    AppEvent::TaskCompleted { .. } | AppEvent::TaskFailed { .. } | AppEvent::TaskCancelled { .. }
-                                ) {
+                                if let Some((status, summary)) = terminal_outcome_of(&app_event) {
                                     terminal_sent = true;
+                                    terminal_status = Some(status);
+                                    terminal_summary = summary;
                                 }
                                 sink(app_event);
                             }
@@ -685,11 +787,10 @@ pub async fn run_task(
             event = events.recv() => {
                 if let Ok(event) = event {
                     for app_event in ctx.convert(&event) {
-                        if matches!(
-                            app_event,
-                            AppEvent::TaskCompleted { .. } | AppEvent::TaskFailed { .. } | AppEvent::TaskCancelled { .. }
-                        ) {
+                        if let Some((status, summary)) = terminal_outcome_of(&app_event) {
                             terminal_sent = true;
+                            terminal_status = Some(status);
+                            terminal_summary = summary;
                         }
                         sink(app_event);
                     }
@@ -708,17 +809,33 @@ pub async fn run_task(
     // 未応答の承認要求が残っていれば破棄する(oneshot の Drop で受信側は自然にキャンセルされる)。
     bridge.clear();
 
-    match outcome {
-        Outcome::Completed => Ok(()),
-        Outcome::Failed(e) => {
-            // session.error 経由なら convert() 側で TaskFailed 済み。タイムアウト等
-            // クライアント側のみの失敗はここで補う(エラーを握りつぶさない)。
-            if !terminal_sent {
-                sink(AppEvent::TaskFailed { session_id, error: e.clone() });
+    // terminal_status が既にあれば convert() が emit した終端 AppEvent(TaskCompleted/Failed/
+    // Cancelled)をそのまま採用する。無ければ(DRAIN_TIMEOUT 内に session.idle 等の
+    // ブロードキャストを拾えなかった稀なケース)send_and_wait 自体の結果で代用する。
+    // 後者の Failed は従来どおりここで TaskFailed を補って emit する(エラーを握りつぶさない)。
+    let (status, summary) = match terminal_status {
+        Some(status) => (status, terminal_summary),
+        None => match &outcome {
+            Outcome::Completed => (TaskStatus::Completed, ctx.last_main_message.clone()),
+            Outcome::Failed(e) => {
+                if !terminal_sent {
+                    sink(AppEvent::TaskFailed { session_id: session_id.clone(), error: e.clone() });
+                }
+                (TaskStatus::Failed, e.clone())
             }
-            Err(e)
-        }
-    }
+        },
+    };
+
+    Ok(RunOutcome {
+        session_id,
+        status,
+        summary,
+        output_files: dedup_output_files(&output_files),
+        total_tokens: ctx.total_tokens,
+        subagents: ctx.subagent_outcomes,
+        started_at,
+        duration_ms: task_start.elapsed().as_millis() as u64,
+    })
 }
 
 /// std に無い RFC3339 風フォーマット(秒精度)。新規クレート追加禁止(chrono 等不可)のため自前実装。

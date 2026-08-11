@@ -73,8 +73,16 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin smoke
   `buildTree` 純関数(src/tree.ts、vitest 9 ケース)+ 実行ビューのツリー描画。
   実機で委任を観測し相関確定(`agent_id` = 委任元 task ツールの tool_call_id、sdk-notes.md 参照)。
   検証: `npx vitest run` と `cargo run --bin step5_check`
-- [ ] **ステップ6: 履歴**
-  history.jsonl への追記(実装済み: `history.rs` の `append`)をタスク完了処理に接続し、一覧表示
+- [x] **ステップ6: 履歴**(2026-08-12 完了)
+  run_task が RunOutcome(status/所要/トークン/出力ファイル/サブエージェント)を返し、
+  タスク終端で history.jsonl に追記。UI は履歴更新・出力フォルダを開く・未完成注記。
+  検証: `cargo run --bin step6_check`(完了+中断の 2 ラウンド)
+
+### 既知の設計上の限界(v0.1)
+
+- モデルが write ツールでなくシェル(Set-Content 等)でファイルを書いた場合、
+  自動承認の対象外(Ask に倒れる=安全側)であり、output_files にも載らない。
+  対策はエージェント定義の Instructions で write ツール使用を指示すること(agents/ のサンプル参照)
 
 ### 検証の習慣
 
