@@ -840,7 +840,8 @@ pub async fn run_task(
 
 /// std に無い RFC3339 風フォーマット(秒精度)。新規クレート追加禁止(chrono 等不可)のため自前実装。
 /// Howard Hinnant の civil_from_days アルゴリズム(グレゴリオ暦、UTC 前提)。
-fn format_rfc3339_now() -> String {
+/// pub(crate): sync.rs のマニフェスト syncedAt にも再利用する(同じ日時算出ロジックを二重実装しない)。
+pub(crate) fn format_rfc3339_now() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();

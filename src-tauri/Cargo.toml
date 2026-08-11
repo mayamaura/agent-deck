@@ -26,3 +26,7 @@ github-copilot-sdk = { version = "1.0.9", default-features = false }
 # sync/time は copilot.rs の中断用 oneshot チャネルと send_and_wait 後のイベントドレインで使用
 # (github-copilot-sdk 自体も同機能を要求するため実質的には既に有効だったが、明示しておく)
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+# v0.2 共有エージェント定義の同期用(docs/roadmap.md v0.2)。定義バージョンの表示(sha256 先頭8桁)と
+# 更新ファイルの検証(v0.3 で使う想定)に必須。RustCrypto の標準実装で、非公式 Copilot 連携ではない
+# ため §1.1 の禁止対象外。10.10 は 2026-08-12 に crates.io で確認した最新版。
+sha2 = "0.10"

@@ -2,7 +2,15 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { AgentSettings, AgentSummary, AppEvent, HistoryEntry } from "./types";
+import type {
+  AgentDefinitionDto,
+  AgentSettings,
+  AgentSummary,
+  AppConfigDto,
+  AppEvent,
+  HistoryEntry,
+  SyncSummary,
+} from "./types";
 import { EVENT_CHANNEL } from "./types";
 import { buildTree } from "./tree";
 import type { AgentRow, TreeState } from "./tree";
@@ -27,6 +35,17 @@ const EMPTY_FORM: ConfigFormState = {
   deniedTools: "",
   autoApprove: true,
 };
+
+/** エージェント定義エディタ(個人スコープ)の編集用状態(docs/roadmap.md v0.2)。 */
+interface DefinitionFormState {
+  name: string;
+  description: string;
+  model: string;
+  tools: string;
+  body: string;
+}
+
+const EMPTY_DEF_FORM: DefinitionFormState = { name: "", description: "", model: "", tools: "", body: "" };
 
 function splitList(text: string): string[] {
   return text
@@ -174,6 +193,20 @@ export default function App() {
   const [form, setForm] = useState<ConfigFormState>(EMPTY_FORM);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
 
+  // エージェント定義エディタ(docs/roadmap.md v0.2)。
+  const [definition, setDefinition] = useState<AgentDefinitionDto | null>(null);
+  const [definitionError, setDefinitionError] = useState<string | null>(null);
+  const [defForm, setDefForm] = useState<DefinitionFormState>(EMPTY_DEF_FORM);
+  const [defSaveStatus, setDefSaveStatus] = useState<string | null>(null);
+  const [newAgentId, setNewAgentId] = useState("");
+  const [newAgentError, setNewAgentError] = useState<string | null>(null);
+
+  // 共有設定(docs/roadmap.md v0.2、決定ログ 2026-08-12: 共有フォルダ方式)。
+  const [appConfig, setAppConfig] = useState<AppConfigDto | null>(null);
+  const [sharedSourceInput, setSharedSourceInput] = useState("");
+  const [syncResult, setSyncResult] = useState<SyncSummary | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
+
   // 応答済みの権限要求 requestId(docs/tree.ts の buildTree 第2引数)。
   const [respondedRequestIds, setRespondedRequestIds] = useState<Set<string>>(new Set());
   const [outputFolderError, setOutputFolderError] = useState<string | null>(null);
@@ -181,14 +214,49 @@ export default function App() {
   const [rowStartedAt, setRowStartedAt] = useState<Record<string, number>>({});
   const [nowTick, setNowTick] = useState(() => Date.now());
 
+  async function reloadAgents() {
+    try {
+      setAgents(await invoke<AgentSummary[]>("list_agents"));
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   useEffect(() => {
-    invoke<AgentSummary[]>("list_agents")
-      .then(setAgents)
-      .catch((e) => setError(String(e)));
+    reloadAgents();
     invoke<HistoryEntry[]>("list_history", { limit: 20 })
       .then(setHistory)
       .catch((e) => setError(String(e)));
+    invoke<AppConfigDto>("get_app_config")
+      .then((c) => {
+        setAppConfig(c);
+        setSharedSourceInput(c.sharedAgentsSource ?? "");
+      })
+      .catch((e) => setError(String(e)));
   }, []);
+
+  // 選択中エージェントの定義(個人=編集可、共有=読み取り専用。docs/roadmap.md v0.2)。
+  // 個人優先で解決された1件を返す(get_agent_definition の仕様)。
+  useEffect(() => {
+    if (!selected) {
+      setDefinition(null);
+      return;
+    }
+    setDefinitionError(null);
+    invoke<AgentDefinitionDto>("get_agent_definition", { agentId: selected })
+      .then((d) => {
+        setDefinition(d);
+        setDefForm({
+          name: d.name,
+          description: d.description,
+          model: d.model ?? "",
+          tools: (d.tools ?? []).join(", "),
+          body: d.body,
+        });
+        setDefSaveStatus(null);
+      })
+      .catch((e) => setDefinitionError(String(e)));
+  }, [selected]);
 
   // 一覧に出す「未設定」バッジのため、全エージェント分の設定をまとめて取得する
   // (get_agent_config は1件ずつしか取れないため並列 invoke。docs/requirements.md §3.2)。
@@ -306,6 +374,106 @@ export default function App() {
     }
   }
 
+  async function handleCreateAgent() {
+    const id = newAgentId.trim();
+    if (!id) return;
+    setNewAgentError(null);
+    try {
+      await invoke("create_agent_definition", {
+        agentId: id,
+        name: id,
+        description: "",
+        tools: null,
+        model: null,
+        body: "",
+      });
+      setNewAgentId("");
+      await reloadAgents();
+      setSelected(id);
+    } catch (e) {
+      setNewAgentError(String(e));
+    }
+  }
+
+  async function handleSaveDefinition() {
+    if (!selected) return;
+    setDefSaveStatus(null);
+    try {
+      await invoke("save_agent_definition", {
+        agentId: selected,
+        name: defForm.name,
+        description: defForm.description,
+        tools: defForm.tools.trim() ? splitList(defForm.tools) : null,
+        model: defForm.model.trim() || null,
+        body: defForm.body,
+      });
+      setDefSaveStatus("✅ 保存しました");
+      await reloadAgents();
+    } catch (e) {
+      setDefSaveStatus(`⚠ 保存に失敗しました: ${e}`);
+    }
+  }
+
+  async function handleDeleteDefinition() {
+    if (!selected) return;
+    if (!window.confirm(`エージェント定義「${selected}」を削除しますか?`)) return;
+    try {
+      await invoke("delete_agent_definition", { agentId: selected });
+      setSelected(null);
+      await reloadAgents();
+    } catch (e) {
+      setDefinitionError(String(e));
+    }
+  }
+
+  async function handleDuplicateAgent() {
+    if (!selected) return;
+    setDefinitionError(null);
+    try {
+      await invoke("duplicate_agent", { agentId: selected });
+      await reloadAgents();
+      // 複製後は個人優先で解決され直すため、編集可能な個人版を再取得する。
+      const d = await invoke<AgentDefinitionDto>("get_agent_definition", { agentId: selected });
+      setDefinition(d);
+      setDefForm({
+        name: d.name,
+        description: d.description,
+        model: d.model ?? "",
+        tools: (d.tools ?? []).join(", "),
+        body: d.body,
+      });
+    } catch (e) {
+      setDefinitionError(String(e));
+    }
+  }
+
+  async function handlePickSharedSource() {
+    const dir = await open({ directory: true });
+    if (typeof dir === "string") setSharedSourceInput(dir);
+  }
+
+  async function handleSaveSharedSource() {
+    setSyncError(null);
+    try {
+      const path = sharedSourceInput.trim() || null;
+      await invoke("save_shared_agents_source", { path });
+      setAppConfig((c) => (c ? { ...c, sharedAgentsSource: path } : c));
+    } catch (e) {
+      setSyncError(String(e));
+    }
+  }
+
+  async function handleSyncSharedAgents() {
+    setSyncError(null);
+    try {
+      const result = await invoke<SyncSummary>("sync_shared_agents_cmd");
+      setSyncResult(result);
+      await reloadAgents();
+    } catch (e) {
+      setSyncError(String(e));
+    }
+  }
+
   async function handleOpenOutputFolder() {
     if (!selected) return;
     setOutputFolderError(null);
@@ -330,19 +498,36 @@ export default function App() {
       <aside className="pane agents">
         <h2>エージェント</h2>
         {error && <p className="error">⚠ {error}</p>}
+        <div className="new-agent-row">
+          <input
+            type="text"
+            placeholder="新規エージェント ID"
+            value={newAgentId}
+            onChange={(e) => setNewAgentId(e.target.value)}
+          />
+          <button type="button" onClick={handleCreateAgent} disabled={!newAgentId.trim()}>
+            新規作成
+          </button>
+        </div>
+        {newAgentError && <p className="error">⚠ {newAgentError}</p>}
         {agents.length === 0 && !error && <p className="muted">定義がありません</p>}
         <ul>
           {agents.map((a) => {
             const c = configs[a.id];
             const unset = !c || !c.inputDir || !c.outputDir;
             return (
-              <li key={a.id}>
+              <li key={`${a.id}:${a.scope}`}>
                 <button
                   className={selected === a.id ? "selected" : ""}
                   onClick={() => setSelected(a.id)}
                 >
                   <strong>
                     {a.name}
+                    <span className={`badge scope-${a.scope}`}>
+                      {a.scope === "shared" ? "🌐 共有" : "👤 個人"}
+                    </span>
+                    {a.version && <span className="muted">v{a.version}</span>}
+                    {a.shadowed && <span className="badge">個人版あり</span>}
                     {unset && <span className="badge">⚠ 未設定</span>}
                   </strong>
                   <span className="muted">{a.description}</span>
@@ -351,6 +536,79 @@ export default function App() {
             );
           })}
         </ul>
+        {selected && definition && (
+          <div className="definition-editor">
+            <h3>定義({definition.scope === "shared" ? "共有・読み取り専用" : "個人"})</h3>
+            {definition.scope === "shared" ? (
+              <>
+                <p className="muted">name: {definition.name}</p>
+                <p className="muted">description: {definition.description}</p>
+                <p className="muted">model: {definition.model ?? "(未指定)"}</p>
+                <p className="muted">tools: {definition.tools ? definition.tools.join(", ") : "(全ツール)"}</p>
+                <pre className="definition-body">{definition.body}</pre>
+                <div className="run-controls">
+                  <button type="button" onClick={handleDuplicateAgent}>
+                    複製して編集
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <label>
+                  名前
+                  <input
+                    type="text"
+                    value={defForm.name}
+                    onChange={(e) => setDefForm((f) => ({ ...f, name: e.target.value }))}
+                  />
+                </label>
+                <label>
+                  説明
+                  <input
+                    type="text"
+                    value={defForm.description}
+                    onChange={(e) => setDefForm((f) => ({ ...f, description: e.target.value }))}
+                  />
+                </label>
+                <label>
+                  モデル(空欄でアプリ既定)
+                  <input
+                    type="text"
+                    value={defForm.model}
+                    onChange={(e) => setDefForm((f) => ({ ...f, model: e.target.value }))}
+                  />
+                </label>
+                <label>
+                  ツール(カンマ区切り。空欄で全ツール)
+                  <input
+                    type="text"
+                    value={defForm.tools}
+                    onChange={(e) => setDefForm((f) => ({ ...f, tools: e.target.value }))}
+                  />
+                </label>
+                <label>
+                  本文(Instructions)
+                  <textarea
+                    className="prompt-input"
+                    rows={6}
+                    value={defForm.body}
+                    onChange={(e) => setDefForm((f) => ({ ...f, body: e.target.value }))}
+                  />
+                </label>
+                <div className="run-controls">
+                  <button type="button" onClick={handleSaveDefinition}>
+                    保存
+                  </button>
+                  <button type="button" onClick={handleDeleteDefinition}>
+                    削除
+                  </button>
+                </div>
+                {defSaveStatus && <p className="muted">{defSaveStatus}</p>}
+              </>
+            )}
+          </div>
+        )}
+        {definitionError && <p className="error">⚠ {definitionError}</p>}
         {selected && (
           <div className="config-form">
             <h3>入出力設定</h3>
@@ -412,6 +670,37 @@ export default function App() {
             {saveStatus && <p className="muted">{saveStatus}</p>}
           </div>
         )}
+        <div className="shared-settings">
+          <h3>共有設定</h3>
+          <label>
+            共有元フォルダ
+            <div className="folder-row">
+              <input
+                type="text"
+                value={sharedSourceInput}
+                onChange={(e) => setSharedSourceInput(e.target.value)}
+              />
+              <button type="button" onClick={handlePickSharedSource}>
+                選択...
+              </button>
+            </div>
+          </label>
+          <div className="run-controls">
+            <button type="button" onClick={handleSaveSharedSource}>
+              保存
+            </button>
+            <button type="button" onClick={handleSyncSharedAgents} disabled={!appConfig?.sharedAgentsSource}>
+              同期
+            </button>
+          </div>
+          {syncError && <p className="error">⚠ {syncError}</p>}
+          {syncResult && (
+            <p className="muted">
+              同期完了({syncResult.syncedAt}): 追加{syncResult.added} / 更新{syncResult.updated} / 削除
+              {syncResult.removed}
+            </p>
+          )}
+        </div>
       </aside>
       <main className="pane run">
         <h2>実行ビュー</h2>

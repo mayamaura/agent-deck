@@ -1,13 +1,28 @@
 use serde::Serialize;
-use std::path::PathBuf;
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
-/// エージェント定義の由来スコープ。
-/// v0.1 は Personal のみだが、v0.2 の共有/個人スコープ分離のために
-/// 読み込み時点から保持しておく(docs/roadmap.md)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// ファイル内容の sha256 を16進文字列で返す。共有定義のバージョン(先頭8桁)と、
+/// sync.rs のマニフェスト(files[id].sha256)の両方で使う共通ヘルパー。
+/// ここに置く理由: `src-tauri/src/bin/*.rs` の検証バイナリは `#[path = "../agents.rs"]`
+/// でこのファイルだけを個別コンパイルするため(step3/5 等の実行確認バイナリには lib クレートが
+/// 無く main.rs のモジュールを直接 use できない、各バイナリ冒頭のコメント参照)、他モジュール
+/// (sync.rs)への依存を持ち込むと検証バイナリ側のビルドが壊れる。依存を持たない sha2 直呼びに留める。
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+/// エージェント定義の由来スコープ(決定ログ 2026-08-12: 個人=agentDirs 編集可、
+/// 共有=data/shared-agents 読み取り専用)。Ord は Personal < Shared とし、
+/// 同名 id が並ぶ際に個人側を先頭にできるようにする(scan_definitions のソート)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AgentScope {
     Personal,
+    Shared,
 }
 
 /// 一覧表示用のエージェント情報(docs/architecture.md §3 list_agents)。
@@ -20,6 +35,10 @@ pub struct AgentSummary {
     pub description: String,
     pub source_path: PathBuf,
     pub scope: AgentScope,
+    /// 共有定義のバージョン(sha256 先頭8桁)。個人定義は None(docs/roadmap.md v0.2)。
+    pub version: Option<String>,
+    /// true = 同名の個人定義に隠されている(実行には使われないが、一覧には残す)。
+    pub shadowed: bool,
 }
 
 /// 実行時に SDK へ渡すための完全な定義(docs/sdk-notes.md「カスタムエージェント」節)。
@@ -37,13 +56,37 @@ pub struct AgentDefinition {
     pub body: String,
     pub source_path: PathBuf,
     pub scope: AgentScope,
+    pub version: Option<String>,
+    pub shadowed: bool,
 }
 
-/// agent_dirs を走査して .agent.md をフルパースする(docs/requirements.md §3.2)。
+/// personal_dirs(複数可・見つからなければエラー)+ shared_dir(単一・無ければ空扱い)を
+/// 走査して .agent.md をフルパースし、個人優先で dedup する(決定ログ 2026-08-12)。
+/// 同名 id が両方にある場合、共有側は shadowed=true として一覧には残すが、実行候補
+/// (main.rs が組み立てる SDK 委任リスト)には含めない(呼び出し側が shadowed で除外する)。
 /// 読めないファイルは握りつぶさず、エラーとして呼び出し側に返す。
-pub fn scan_definitions(agent_dirs: &[PathBuf]) -> Result<Vec<AgentDefinition>, String> {
+pub fn scan_definitions(personal_dirs: &[PathBuf], shared_dir: &Path) -> Result<Vec<AgentDefinition>, String> {
+    let mut agents = scan_dir(personal_dirs, AgentScope::Personal)?;
+    let personal_ids: HashSet<&str> = agents.iter().map(|d| d.id.as_str()).collect();
+
+    if shared_dir.is_dir() {
+        let shared_path = shared_dir.to_path_buf();
+        let mut shared = scan_dir(std::slice::from_ref(&shared_path), AgentScope::Shared)?;
+        for d in &mut shared {
+            d.shadowed = personal_ids.contains(d.id.as_str());
+        }
+        agents.extend(shared);
+    }
+
+    agents.sort_by(|a, b| a.id.cmp(&b.id).then(a.scope.cmp(&b.scope)));
+    Ok(agents)
+}
+
+/// dirs 内の *.agent.md を読んでパースする(scan_definitions の内部ヘルパー)。
+/// version は Shared スコープのみ計算する(sha256 先頭8桁。docs/roadmap.md v0.2)。
+fn scan_dir(dirs: &[PathBuf], scope: AgentScope) -> Result<Vec<AgentDefinition>, String> {
     let mut agents = Vec::new();
-    for dir in agent_dirs {
+    for dir in dirs {
         if !dir.is_dir() {
             return Err(format!("エージェント定義フォルダがありません: {}", dir.display()));
         }
@@ -59,6 +102,10 @@ pub fn scan_definitions(agent_dirs: &[PathBuf]) -> Result<Vec<AgentDefinition>, 
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| format!("{} を読めません: {e}", path.display()))?;
             let doc = parse_agent_md(&text);
+            let version = match scope {
+                AgentScope::Shared => Some(sha256_hex(text.as_bytes())[..8].to_string()),
+                AgentScope::Personal => None,
+            };
             agents.push(AgentDefinition {
                 id: id.to_string(),
                 name: doc.name.unwrap_or_else(|| id.to_string()),
@@ -67,17 +114,18 @@ pub fn scan_definitions(agent_dirs: &[PathBuf]) -> Result<Vec<AgentDefinition>, 
                 model: doc.model,
                 body: doc.body,
                 source_path: path,
-                scope: AgentScope::Personal,
+                scope,
+                version,
+                shadowed: false,
             });
         }
     }
-    agents.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(agents)
 }
 
 /// 一覧表示用に AgentDefinition から必要な項目だけ取り出す(重複パース排除)。
-pub fn scan(agent_dirs: &[PathBuf]) -> Result<Vec<AgentSummary>, String> {
-    Ok(scan_definitions(agent_dirs)?
+pub fn scan(personal_dirs: &[PathBuf], shared_dir: &Path) -> Result<Vec<AgentSummary>, String> {
+    Ok(scan_definitions(personal_dirs, shared_dir)?
         .into_iter()
         .map(|d| AgentSummary {
             id: d.id,
@@ -85,6 +133,8 @@ pub fn scan(agent_dirs: &[PathBuf]) -> Result<Vec<AgentSummary>, String> {
             description: d.description,
             source_path: d.source_path,
             scope: d.scope,
+            version: d.version,
+            shadowed: d.shadowed,
         })
         .collect())
 }
@@ -217,5 +267,80 @@ mod tests {
         let text = "---\nname: a\n---\n本文";
         let doc = parse_agent_md(text);
         assert!(doc.tools.is_none());
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("agent_deck_test_agents_{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 同名 id が個人・共有の両方にある場合: 個人優先(実行候補は個人)、
+    /// 共有側は shadowed=true として一覧には残る(決定ログ 2026-08-12)。
+    #[test]
+    fn personal_wins_over_shared_with_same_id_and_shared_is_shadowed() {
+        let base = temp_dir("dedup");
+        let personal = base.join("personal");
+        let shared = base.join("shared");
+        std::fs::create_dir_all(&personal).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(personal.join("survey.agent.md"), "---\nname: 個人版\n---\n個人の本文").unwrap();
+        std::fs::write(shared.join("survey.agent.md"), "---\nname: 共有版\n---\n共有の本文").unwrap();
+        std::fs::write(shared.join("only-shared.agent.md"), "---\nname: 共有のみ\n---\n本文").unwrap();
+
+        let result = scan_definitions(&[personal], &shared).unwrap();
+        let survey_entries: Vec<&AgentDefinition> = result.iter().filter(|d| d.id == "survey").collect();
+        assert_eq!(survey_entries.len(), 2, "個人・共有の両方が一覧に残ること");
+
+        let personal_entry = survey_entries.iter().find(|d| d.scope == AgentScope::Personal).unwrap();
+        assert!(!personal_entry.shadowed);
+        assert_eq!(personal_entry.name, "個人版");
+
+        let shared_entry = survey_entries.iter().find(|d| d.scope == AgentScope::Shared).unwrap();
+        assert!(shared_entry.shadowed, "共有側は個人版に隠されている");
+        assert_eq!(shared_entry.name, "共有版");
+
+        let only_shared = result.iter().find(|d| d.id == "only-shared").unwrap();
+        assert!(!only_shared.shadowed, "個人版が無ければ shadowed にならない");
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn shared_version_is_sha256_prefix_and_personal_has_no_version() {
+        let base = temp_dir("version");
+        let personal = base.join("personal");
+        let shared = base.join("shared");
+        std::fs::create_dir_all(&personal).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        let text = "---\nname: a\n---\n本文";
+        std::fs::write(personal.join("a.agent.md"), text).unwrap();
+        std::fs::write(shared.join("b.agent.md"), text).unwrap();
+
+        let result = scan_definitions(&[personal], &shared).unwrap();
+        let personal_entry = result.iter().find(|d| d.id == "a").unwrap();
+        assert!(personal_entry.version.is_none());
+
+        let shared_entry = result.iter().find(|d| d.id == "b").unwrap();
+        let expected = &sha256_hex(text.as_bytes())[..8];
+        assert_eq!(shared_entry.version.as_deref(), Some(expected));
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn missing_shared_dir_is_empty_not_error() {
+        let base = temp_dir("no_shared");
+        let personal = base.join("personal");
+        std::fs::create_dir_all(&personal).unwrap();
+        std::fs::write(personal.join("a.agent.md"), "---\nname: a\n---\n本文").unwrap();
+        let shared = base.join("does-not-exist");
+
+        let result = scan_definitions(&[personal], &shared).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].scope, AgentScope::Personal);
+
+        std::fs::remove_dir_all(&base).ok();
     }
 }

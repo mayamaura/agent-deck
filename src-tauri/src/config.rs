@@ -12,6 +12,10 @@ pub struct AppConfig {
     pub copilot_cli_path: Option<PathBuf>,
     pub default_model: Option<String>,
     pub log_level: String,
+    /// 共有エージェント定義の同期元フォルダ(docs/roadmap.md v0.2、決定ログ 2026-08-12: 共有フォルダ方式)。
+    /// 既存の config.json に無くても読めるよう serde default(欠落時は None)。
+    #[serde(default)]
+    pub shared_agents_source: Option<PathBuf>,
 }
 
 impl Default for AppConfig {
@@ -22,6 +26,7 @@ impl Default for AppConfig {
             copilot_cli_path: None,
             default_model: None,
             log_level: "info".into(),
+            shared_agents_source: None,
         }
     }
 }
@@ -89,8 +94,36 @@ pub fn load_app_config(data_dir: &Path) -> Result<AppConfig, String> {
     load_or_default(&data_dir.join("config.json"))
 }
 
+pub fn save_app_config(data_dir: &Path, config: &AppConfig) -> Result<(), String> {
+    let path = data_dir.join("config.json");
+    let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
+    fs::write(&path, json).map_err(|e| format!("{} に保存できません: {e}", path.display()))
+}
+
 pub fn load_agents_config(data_dir: &Path) -> Result<AgentsConfig, String> {
     load_or_default(&data_dir.join("agents.json"))
+}
+
+/// 共有エージェント定義の同期先(docs/roadmap.md v0.2、アプリ内では読み取り専用)。
+pub fn shared_agents_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("shared-agents")
+}
+
+/// 共有同期のマニフェスト置き場(sync::sync_shared_agents / load_manifest が使う)。
+pub fn shared_agents_meta_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("shared-agents.meta.json")
+}
+
+/// 個人スコープの書き込み先(決定ログ 2026-08-12: 個人=agentDirs 編集可)。
+/// agentDirs の先頭を使う。agentDirs が空なら data/agents/ を自動作成して使う
+/// (初回起動でも個人スコープの作成・編集が成立するようにするため)。
+pub fn personal_agent_dir(config: &AppConfig, data_dir: &Path) -> Result<PathBuf, String> {
+    if let Some(first) = config.agent_dirs.first() {
+        return Ok(first.clone());
+    }
+    let dir = data_dir.join("agents");
+    fs::create_dir_all(&dir).map_err(|e| format!("{} を作成できません: {e}", dir.display()))?;
+    Ok(dir)
 }
 
 pub fn save_agents_config(data_dir: &Path, config: &AgentsConfig) -> Result<(), String> {

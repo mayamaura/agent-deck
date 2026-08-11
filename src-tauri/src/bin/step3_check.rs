@@ -66,7 +66,10 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let definitions = match agents::scan_definitions(&[agent_dir.clone()]) {
+    // v0.2 で scan_definitions は個人+共有の2引数になった。このバイナリは共有スコープを
+    // 試験しないため、存在しないフォルダを渡す(scan_definitions は共有側が無ければ空扱い)。
+    let no_shared_dir = agent_dir.join("__no_shared__");
+    let definitions = match agents::scan_definitions(&[agent_dir.clone()], &no_shared_dir) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("scan_definitions に失敗しました: {e}");

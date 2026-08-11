@@ -7,9 +7,10 @@ mod copilot;
 mod events;
 mod history;
 mod permissions;
+mod sync;
 
-use config::AgentSettings;
-use std::path::PathBuf;
+use config::{AgentSettings, AppConfig};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State};
 
@@ -42,14 +43,222 @@ impl AppState {
     }
 }
 
+/// 個人スコープの走査対象フォルダ一覧(決定ログ 2026-08-12)。
+/// agentDirs が設定されていればそれを全て、未設定なら data/agents/ を自動作成して使う
+/// (初回起動でもエラーにせず個人スコープが動くようにするため。旧: agentDirs 未設定はエラー)。
+fn personal_scan_dirs(cfg: &AppConfig, data_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    if cfg.agent_dirs.is_empty() {
+        Ok(vec![config::personal_agent_dir(cfg, data_dir)?])
+    } else {
+        Ok(cfg.agent_dirs.clone())
+    }
+}
+
+/// エージェント ID をファイル名の一部として使う箇所(create_agent_definition)向けの検証。
+/// パス区切りや `..` を含む ID はフォルダ脱出につながるため拒否する
+/// (docs/development.md §3: パス判定は正規化済み絶対パスで、の趣旨に沿い、
+/// そもそも脱出可能な文字を入力段階で弾く)。
+fn validate_agent_id(agent_id: &str) -> Result<(), String> {
+    if agent_id.is_empty() || agent_id.contains(['/', '\\']) || agent_id == "." || agent_id == ".." {
+        return Err(format!("不正なエージェント ID です: {agent_id}"));
+    }
+    Ok(())
+}
+
+/// frontmatter + 本文の .agent.md テキストを組み立てる(save/create_agent_definition 共通)。
+fn render_agent_md(name: &str, description: &str, model: &Option<String>, tools: &Option<Vec<String>>, body: &str) -> String {
+    let mut out = String::from("---\n");
+    out.push_str(&format!("name: {name}\n"));
+    out.push_str(&format!("description: {description}\n"));
+    if let Some(model) = model {
+        out.push_str(&format!("model: {model}\n"));
+    }
+    if let Some(tools) = tools {
+        let list = tools.iter().map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(", ");
+        out.push_str(&format!("tools: [{list}]\n"));
+    }
+    out.push_str("---\n\n");
+    out.push_str(body.trim());
+    out.push('\n');
+    out
+}
+
 #[tauri::command]
 fn list_agents(state: State<AppState>) -> Result<Vec<agents::AgentSummary>, String> {
     let data_dir = state.data_dir()?;
     let cfg = config::load_app_config(data_dir)?;
-    if cfg.agent_dirs.is_empty() {
-        return Err("エージェント定義フォルダが未設定です。data/config.json の agentDirs を設定してください".into());
+    let personal_dirs = personal_scan_dirs(&cfg, data_dir)?;
+    let shared_dir = config::shared_agents_dir(data_dir);
+    agents::scan(&personal_dirs, &shared_dir)
+}
+
+/// エディタ表示用の完全な定義(docs/roadmap.md v0.2)。SDK 型は含まない。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentDefinitionDto {
+    id: String,
+    name: String,
+    description: String,
+    tools: Option<Vec<String>>,
+    model: Option<String>,
+    body: String,
+    scope: agents::AgentScope,
+    version: Option<String>,
+    source_path: PathBuf,
+}
+
+impl From<agents::AgentDefinition> for AgentDefinitionDto {
+    fn from(d: agents::AgentDefinition) -> Self {
+        Self {
+            id: d.id,
+            name: d.name,
+            description: d.description,
+            tools: d.tools,
+            model: d.model,
+            body: d.body,
+            scope: d.scope,
+            version: d.version,
+            source_path: d.source_path,
+        }
     }
-    agents::scan(&cfg.agent_dirs)
+}
+
+#[tauri::command]
+fn get_agent_definition(state: State<AppState>, agent_id: String) -> Result<AgentDefinitionDto, String> {
+    let data_dir = state.data_dir()?;
+    let cfg = config::load_app_config(data_dir)?;
+    let personal_dirs = personal_scan_dirs(&cfg, data_dir)?;
+    let shared_dir = config::shared_agents_dir(data_dir);
+    let definitions = agents::scan_definitions(&personal_dirs, &shared_dir)?;
+    // shadowed(個人版に隠された共有版)は返さない。個人が勝つ(決定ログ 2026-08-12)。
+    definitions
+        .into_iter()
+        .find(|d| d.id == agent_id && !d.shadowed)
+        .map(AgentDefinitionDto::from)
+        .ok_or_else(|| format!("エージェント定義が見つかりません: {agent_id}"))
+}
+
+#[tauri::command]
+fn save_agent_definition(
+    state: State<AppState>,
+    agent_id: String,
+    name: String,
+    description: String,
+    tools: Option<Vec<String>>,
+    model: Option<String>,
+    body: String,
+) -> Result<(), String> {
+    let data_dir = state.data_dir()?;
+    let cfg = config::load_app_config(data_dir)?;
+    let personal_dirs = personal_scan_dirs(&cfg, data_dir)?;
+    let shared_dir = config::shared_agents_dir(data_dir);
+    let definitions = agents::scan_definitions(&personal_dirs, &shared_dir)?;
+    let existing = definitions
+        .iter()
+        .find(|d| d.id == agent_id && d.scope == agents::AgentScope::Personal)
+        .ok_or_else(|| format!("個人のエージェント定義が見つかりません(共有定義は編集できません): {agent_id}"))?;
+    let content = render_agent_md(&name, &description, &model, &tools, &body);
+    std::fs::write(&existing.source_path, content)
+        .map_err(|e| format!("{} に保存できません: {e}", existing.source_path.display()))
+}
+
+#[tauri::command]
+fn create_agent_definition(
+    state: State<AppState>,
+    agent_id: String,
+    name: String,
+    description: String,
+    tools: Option<Vec<String>>,
+    model: Option<String>,
+    body: String,
+) -> Result<(), String> {
+    validate_agent_id(&agent_id)?;
+    let data_dir = state.data_dir()?;
+    let cfg = config::load_app_config(data_dir)?;
+    let personal_dirs = personal_scan_dirs(&cfg, data_dir)?;
+    let shared_dir = config::shared_agents_dir(data_dir);
+    let definitions = agents::scan_definitions(&personal_dirs, &shared_dir)?;
+    if definitions.iter().any(|d| d.id == agent_id) {
+        return Err(format!("エージェント定義が既に存在します: {agent_id}"));
+    }
+    let target_dir = config::personal_agent_dir(&cfg, data_dir)?;
+    let path = target_dir.join(format!("{agent_id}.agent.md"));
+    let content = render_agent_md(&name, &description, &model, &tools, &body);
+    std::fs::write(&path, content).map_err(|e| format!("{} に保存できません: {e}", path.display()))
+}
+
+/// 共有定義を同じ id で個人スコープへコピーする(「複製して編集」。決定ログ 2026-08-12)。
+/// 個人優先の dedup により、以後は複製したファイルが実行・編集対象になる。
+#[tauri::command]
+fn duplicate_agent(state: State<AppState>, agent_id: String) -> Result<(), String> {
+    let data_dir = state.data_dir()?;
+    let cfg = config::load_app_config(data_dir)?;
+    let personal_dirs = personal_scan_dirs(&cfg, data_dir)?;
+    let shared_dir = config::shared_agents_dir(data_dir);
+    let definitions = agents::scan_definitions(&personal_dirs, &shared_dir)?;
+    if definitions.iter().any(|d| d.id == agent_id && d.scope == agents::AgentScope::Personal) {
+        return Err(format!("個人版が既に存在します: {agent_id}"));
+    }
+    let shared = definitions
+        .iter()
+        .find(|d| d.id == agent_id && d.scope == agents::AgentScope::Shared)
+        .ok_or_else(|| format!("共有エージェント定義が見つかりません: {agent_id}"))?;
+    let target_dir = config::personal_agent_dir(&cfg, data_dir)?;
+    let dest = target_dir.join(format!("{agent_id}.agent.md"));
+    let text = std::fs::read_to_string(&shared.source_path)
+        .map_err(|e| format!("{} を読めません: {e}", shared.source_path.display()))?;
+    std::fs::write(&dest, text).map_err(|e| format!("{} に保存できません: {e}", dest.display()))
+}
+
+#[tauri::command]
+fn delete_agent_definition(state: State<AppState>, agent_id: String) -> Result<(), String> {
+    let data_dir = state.data_dir()?;
+    let cfg = config::load_app_config(data_dir)?;
+    let personal_dirs = personal_scan_dirs(&cfg, data_dir)?;
+    let shared_dir = config::shared_agents_dir(data_dir);
+    let definitions = agents::scan_definitions(&personal_dirs, &shared_dir)?;
+    let existing = definitions
+        .iter()
+        .find(|d| d.id == agent_id && d.scope == agents::AgentScope::Personal)
+        .ok_or_else(|| format!("個人のエージェント定義が見つかりません: {agent_id}"))?;
+    std::fs::remove_file(&existing.source_path)
+        .map_err(|e| format!("{} を削除できません: {e}", existing.source_path.display()))
+}
+
+#[tauri::command]
+fn sync_shared_agents_cmd(state: State<AppState>) -> Result<sync::SyncSummary, String> {
+    let data_dir = state.data_dir()?;
+    let cfg = config::load_app_config(data_dir)?;
+    let source = cfg
+        .shared_agents_source
+        .ok_or("共有元フォルダが未設定です。設定画面で指定してください")?;
+    let shared_dir = config::shared_agents_dir(data_dir);
+    let meta_path = config::shared_agents_meta_path(data_dir);
+    sync::sync_shared_agents(&source, &shared_dir, &meta_path)
+}
+
+/// GUI に見せるアプリ設定の一部(docs/roadmap.md v0.2)。設定はファイルが正であり
+/// GUI はそれを読み書きするだけ(docs/development.md §3)。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppConfigDto {
+    shared_agents_source: Option<PathBuf>,
+    default_model: Option<String>,
+}
+
+#[tauri::command]
+fn get_app_config(state: State<AppState>) -> Result<AppConfigDto, String> {
+    let data_dir = state.data_dir()?;
+    let cfg = config::load_app_config(data_dir)?;
+    Ok(AppConfigDto { shared_agents_source: cfg.shared_agents_source, default_model: cfg.default_model })
+}
+
+#[tauri::command]
+fn save_shared_agents_source(state: State<AppState>, path: Option<String>) -> Result<(), String> {
+    let data_dir = state.data_dir()?;
+    let mut cfg = config::load_app_config(data_dir)?;
+    cfg.shared_agents_source = path.map(PathBuf::from);
+    config::save_app_config(data_dir, &cfg)
 }
 
 #[tauri::command]
@@ -104,9 +313,15 @@ fn start_task(app: tauri::AppHandle, state: State<AppState>, agent_id: String, p
     let cfg = config::load_app_config(&data_dir)?;
     let cli_path = copilot::resolve_cli_path(cfg.copilot_cli_path.as_deref())?;
 
-    // エージェント定義を全件読み、選択された agent_id に一致するものを探す。
+    // エージェント定義を全件(個人+共有)読み、選択された agent_id に一致するものを探す。
     // 選択外の定義もセッションに渡す(SDK 側の自動委任の候補にするため。docs/sdk-notes.md「カスタムエージェント」節)。
-    let definitions = agents::scan_definitions(&cfg.agent_dirs)?;
+    // shadowed(個人版に隠された共有版)は実行候補から除外する(決定ログ 2026-08-12: 個人優先)。
+    let personal_dirs = personal_scan_dirs(&cfg, &data_dir)?;
+    let shared_dir = config::shared_agents_dir(&data_dir);
+    let definitions: Vec<agents::AgentDefinition> = agents::scan_definitions(&personal_dirs, &shared_dir)?
+        .into_iter()
+        .filter(|d| !d.shadowed)
+        .collect();
     let selected = definitions
         .iter()
         .find(|d| d.id == agent_id)
@@ -258,6 +473,14 @@ fn main() {
             list_agents,
             get_agent_config,
             save_agent_config,
+            get_agent_definition,
+            save_agent_definition,
+            create_agent_definition,
+            duplicate_agent,
+            delete_agent_definition,
+            sync_shared_agents_cmd,
+            get_app_config,
+            save_shared_agents_source,
             list_history,
             open_output_folder,
             start_task,
@@ -266,4 +489,63 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("Tauri の起動に失敗しました");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// save/create_agent_definition が書き出す形式(render_agent_md)を
+    /// scan_definitions で読み戻せることを確認する(定義の書き出し→読み戻し round-trip)。
+    #[test]
+    fn render_agent_md_round_trips_through_scan_definitions() {
+        let base = std::env::temp_dir().join("agent_deck_test_main_roundtrip");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let shared = base.join("shared"); // 存在しない → scan_definitions は空扱い
+
+        let tools = Some(vec!["read".to_string(), "write".to_string()]);
+        let model = Some("claude-sonnet-4".to_string());
+        let content = render_agent_md(
+            "集計くん",
+            "アンケート集計を行う",
+            &model,
+            &tools,
+            "# 役割\n数字はスクリプトで出す",
+        );
+        std::fs::write(base.join("survey-analyst.agent.md"), content).unwrap();
+
+        let defs = agents::scan_definitions(&[base.clone()], &shared).unwrap();
+        assert_eq!(defs.len(), 1);
+        let d = &defs[0];
+        assert_eq!(d.id, "survey-analyst");
+        assert_eq!(d.name, "集計くん");
+        assert_eq!(d.description, "アンケート集計を行う");
+        assert_eq!(d.model.as_deref(), Some("claude-sonnet-4"));
+        assert_eq!(d.tools, Some(vec!["read".to_string(), "write".to_string()]));
+        assert_eq!(d.body, "# 役割\n数字はスクリプトで出す");
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn validate_agent_id_rejects_path_separators_and_dotdot() {
+        assert!(validate_agent_id("survey-analyst").is_ok());
+        assert!(validate_agent_id("../escape").is_err());
+        assert!(validate_agent_id("a/b").is_err());
+        assert!(validate_agent_id("a\\b").is_err());
+        assert!(validate_agent_id("").is_err());
+    }
+
+    #[test]
+    fn personal_scan_dirs_falls_back_to_auto_created_data_agents_when_empty() {
+        let base = std::env::temp_dir().join("agent_deck_test_main_personal_dirs");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let cfg = AppConfig::default();
+        let dirs = personal_scan_dirs(&cfg, &base).unwrap();
+        assert_eq!(dirs, vec![base.join("agents")]);
+        assert!(base.join("agents").is_dir());
+        std::fs::remove_dir_all(&base).ok();
+    }
 }

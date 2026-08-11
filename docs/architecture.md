@@ -59,29 +59,39 @@ crates.io には Copilot CLI を制御する非公式クレートが複数存在
 
 ### 2.1 Rust モジュール対応表
 
-| ファイル | 責務 | 状態 |
-|---|---|---|
-| `src-tauri/src/main.rs` | Tauri 起動、コマンド定義、AppState | コマンド骨格実装済み(SDK 系はスタブ) |
-| `src-tauri/src/config.rs` | config.json / agents.json の読み書き、data/ の解決 | 実装済み |
-| `src-tauri/src/agents.rs` | `.agent.md` の走査と frontmatter パース | 実装済み(スコープ拡張余地あり) |
-| `src-tauri/src/events.rs` | `AppEvent` 定義(SDK イベントの変換先) | 型定義済み |
-| `src-tauri/src/permissions.rs` | 権限判定・パス正規化 | ロジック+テスト実装済み |
-| `src-tauri/src/history.rs` | history.jsonl の追記・読み出し | 実装済み |
-| `src-tauri/src/bin/smoke.rs` | SDK 疎通確認バイナリ(ステップ1成果物) | 実装済み・動作確認済み |
-| (未作成)`src-tauri/src/copilot.rs` | SDK セッション管理、イベント購読→変換→emit | ステップ2で作成 |
+| ファイル | 責務 |
+|---|---|
+| `src-tauri/src/main.rs` | Tauri 起動、コマンド定義、AppState(実行中タスク・PermissionBridge) |
+| `src-tauri/src/copilot.rs` | SDK セッション管理・実行(run_task/RunOutcome)、イベント変換(EventContext)、権限ハンドラ(UiPermissionHandler/PermissionBridge)。SDK 型はこのモジュールに閉じる |
+| `src-tauri/src/config.rs` | config.json / agents.json の読み書き、data/・個人/共有ディレクトリの解決 |
+| `src-tauri/src/agents.rs` | `.agent.md` のフルパース、個人+共有スキャン(個人優先 dedup) |
+| `src-tauri/src/sync.rs` | 共有定義のフォルダ同期とマニフェスト(sha256) |
+| `src-tauri/src/events.rs` | `AppEvent` 定義(SDK イベントの変換先) |
+| `src-tauri/src/permissions.rs` | 権限判定(decide)・CLI 記法パターン照合・パス正規化 |
+| `src-tauri/src/history.rs` | history.jsonl の追記・読み出し・RunOutcome からの組み立て |
+| `src-tauri/src/bin/*.rs` | smoke / step2〜6_check: 各ステップのヘッドレス実機検証バイナリ |
+| `src/tree.ts` | イベント列 → ツリー状態の純関数(vitest でテスト) |
 
 ## 3. Tauri コマンド(フロント → Rust)
 
 | コマンド | 引数 | 戻り値 | 用途 |
 |---|---|---|---|
-| `list_agents` | なし | `Vec<AgentSummary>` | エージェント一覧の取得 |
+| `list_agents` | なし | `Vec<AgentSummary>` | 一覧の取得(個人+共有のマージ。version / shadowed 込み) |
 | `get_agent_config` | `agent_id` | `Option<AgentSettings>` | 入出力設定の取得 |
 | `save_agent_config` | `agent_id`, `AgentSettings` | `()` | 入出力設定の保存 |
-| `start_task` | `agent_id`, `prompt` | `SessionId` | タスクの実行開始 |
-| `cancel_task` | `session_id` | `()` | 実行の中断 |
+| `start_task` | `agent_id`, `prompt` | `()` | タスクの実行開始 |
+| `cancel_task` | `session_id` | `()` | 実行の中断(Session::abort) |
 | `respond_permission` | `request_id`, `decision` | `()` | 承認ダイアログの応答 |
 | `list_history` | `limit` | `Vec<HistoryEntry>` | 実行履歴の取得 |
 | `open_output_folder` | `agent_id` | `()` | 出力先をエクスプローラで開く(`explorer` 直接起動、プラグイン不要) |
+| `get_agent_definition` | `agent_id` | `AgentDefinitionDto` | 定義エディタ用の全文取得(v0.2) |
+| `save_agent_definition` | `agent_id`, 各フィールド | `()` | 個人スコープ定義の保存(共有はエラー) |
+| `create_agent_definition` | `agent_id`, 各フィールド | `()` | 個人スコープに新規作成 |
+| `duplicate_agent` | `agent_id` | `()` | 共有定義を同 id で個人へ複製(複製して編集) |
+| `delete_agent_definition` | `agent_id` | `()` | 個人スコープ定義の削除 |
+| `sync_shared_agents_cmd` | なし | `SyncSummary` | 共有元フォルダから data/shared-agents へ同期 |
+| `get_app_config` | なし | `AppConfigDto` | アプリ設定の取得(共有元フォルダ等) |
+| `save_shared_agents_source` | `path` | `()` | 共有元フォルダの保存(config.json を更新) |
 
 ## 4. イベント(Rust → フロント)
 
@@ -133,10 +143,14 @@ SDK イベント → AppEvent の対応(ステップ2で実装。イベント名
 <exe と同じ階層>/
 ├─ agent-deck.exe
 └─ data/
-   ├─ config.json          アプリ全体の設定
-   ├─ agents.json          エージェントごとの入出力設定
-   ├─ history.jsonl        実行履歴(追記のみ)
-   └─ logs/                実行ログ(セッション単位)
+   ├─ config.json               アプリ全体の設定
+   ├─ agents.json               エージェントごとの入出力設定
+   ├─ history.jsonl             実行履歴(追記のみ)
+   ├─ agents/                   個人スコープの定義(agentDirs 未設定時の既定)
+   ├─ shared-agents/            共有スコープの定義(同期先・アプリ内読み取り専用)
+   ├─ shared-agents.meta.json   同期マニフェスト(同期元・時刻・sha256)
+   ├─ workspace/<agent_id>/     inputDir 未設定エージェントの作業ディレクトリ
+   └─ logs/                     実行ログ(セッション単位)
 ```
 
 ポータブル運用のため、**ユーザープロファイル配下ではなく exe と同階層**に置く。
@@ -154,7 +168,8 @@ SDK イベント → AppEvent の対応(ステップ2で実装。イベント名
   "agentDirs": ["C:/work/agent-deck/agents"],
   "copilotCliPath": null,
   "defaultModel": null,
-  "logLevel": "info"
+  "logLevel": "info",
+  "sharedAgentsSource": null
 }
 ```
 
