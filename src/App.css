@@ -266,3 +266,36 @@ th, td {
 }
 
 th { color: #555; font-weight: normal; }
+
+.update-banner {
+  padding: 6px 12px;
+  background: #e3f0ff;
+  border-bottom: 1px solid #b8d4f5;
+  font-size: 13px;
+}
+
+.update-banner-danger {
+  background: #fde8e8;
+  border-bottom-color: #f0b8b8;
+}
+
+.update-banner-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.update-banner-text {
+  flex: 1;
+}
+
+.update-banner-warning {
+  color: #b00020;
+  font-weight: bold;
+}
+
+.app-version {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid #eee;
+}

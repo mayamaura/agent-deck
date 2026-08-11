@@ -8,6 +8,7 @@ mod events;
 mod history;
 mod permissions;
 mod sync;
+mod update;
 
 use config::{AgentSettings, AppConfig};
 use std::path::{Path, PathBuf};
@@ -237,20 +238,28 @@ fn sync_shared_agents_cmd(state: State<AppState>) -> Result<sync::SyncSummary, S
     sync::sync_shared_agents(&source, &shared_dir, &meta_path)
 }
 
-/// GUI に見せるアプリ設定の一部(docs/roadmap.md v0.2)。設定はファイルが正であり
+/// GUI に見せるアプリ設定の一部(docs/roadmap.md v0.2 / v0.3)。設定はファイルが正であり
 /// GUI はそれを読み書きするだけ(docs/development.md §3)。
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppConfigDto {
     shared_agents_source: Option<PathBuf>,
     default_model: Option<String>,
+    update_source: Option<PathBuf>,
+    /// 表示用の現行バージョン(docs/roadmap.md v0.3、UI に「agent-deck vX.Y.Z」を出す用途)。
+    current_version: String,
 }
 
 #[tauri::command]
 fn get_app_config(state: State<AppState>) -> Result<AppConfigDto, String> {
     let data_dir = state.data_dir()?;
     let cfg = config::load_app_config(data_dir)?;
-    Ok(AppConfigDto { shared_agents_source: cfg.shared_agents_source, default_model: cfg.default_model })
+    Ok(AppConfigDto {
+        shared_agents_source: cfg.shared_agents_source,
+        default_model: cfg.default_model,
+        update_source: cfg.update_source,
+        current_version: env!("CARGO_PKG_VERSION").to_string(),
+    })
 }
 
 #[tauri::command]
@@ -259,6 +268,53 @@ fn save_shared_agents_source(state: State<AppState>, path: Option<String>) -> Re
     let mut cfg = config::load_app_config(data_dir)?;
     cfg.shared_agents_source = path.map(PathBuf::from);
     config::save_app_config(data_dir, &cfg)
+}
+
+/// check_for_updates の戻り値(docs/roadmap.md v0.3.0)。file_path は UI に出さない
+/// (「配布フォルダを開く」は updateSource そのものを開くため不要。update::UpdateInfo 参照)。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateInfoDto {
+    version: String,
+    notes: String,
+    hash_ok: bool,
+}
+
+impl From<update::UpdateInfo> for UpdateInfoDto {
+    fn from(u: update::UpdateInfo) -> Self {
+        Self { version: u.version, notes: u.notes, hash_ok: u.hash_ok }
+    }
+}
+
+/// updateSource が未設定なら Ok(None)(未設定は「更新確認をしない」であってエラーではない)。
+#[tauri::command]
+fn check_for_updates(state: State<AppState>) -> Result<Option<UpdateInfoDto>, String> {
+    let data_dir = state.data_dir()?;
+    let cfg = config::load_app_config(data_dir)?;
+    let Some(source) = cfg.update_source else { return Ok(None) };
+    let info = update::check_updates(&source, env!("CARGO_PKG_VERSION"))?;
+    Ok(info.map(UpdateInfoDto::from))
+}
+
+#[tauri::command]
+fn save_update_source(state: State<AppState>, path: Option<String>) -> Result<(), String> {
+    let data_dir = state.data_dir()?;
+    let mut cfg = config::load_app_config(data_dir)?;
+    cfg.update_source = path.map(PathBuf::from);
+    config::save_app_config(data_dir, &cfg)
+}
+
+#[tauri::command]
+fn open_update_folder(state: State<AppState>) -> Result<(), String> {
+    let data_dir = state.data_dir()?;
+    let cfg = config::load_app_config(data_dir)?;
+    let dir = cfg.update_source.ok_or("更新配布フォルダが未設定です")?;
+    // Windows 専用アプリなので explorer を直接呼ぶ(プラグイン不要。open_output_folder と同じ方式)。
+    std::process::Command::new("explorer")
+        .arg(&dir)
+        .spawn()
+        .map_err(|e| format!("エクスプローラを起動できません: {e}"))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -481,6 +537,9 @@ fn main() {
             sync_shared_agents_cmd,
             get_app_config,
             save_shared_agents_source,
+            check_for_updates,
+            save_update_source,
+            open_update_folder,
             list_history,
             open_output_folder,
             start_task,

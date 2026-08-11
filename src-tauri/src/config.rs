@@ -16,6 +16,11 @@ pub struct AppConfig {
     /// 既存の config.json に無くても読めるよう serde default(欠落時は None)。
     #[serde(default)]
     pub shared_agents_source: Option<PathBuf>,
+    /// アプリ本体の更新配布フォルダ(docs/roadmap.md v0.3.0: 共有フォルダ+マニフェスト方式のみ)。
+    /// 直下に manifest.json を置く想定(update::check_updates)。既存 config.json に無くても
+    /// 読めるよう serde default(欠落時は None)。
+    #[serde(default)]
+    pub update_source: Option<PathBuf>,
 }
 
 impl Default for AppConfig {
@@ -27,6 +32,7 @@ impl Default for AppConfig {
             default_model: None,
             log_level: "info".into(),
             shared_agents_source: None,
+            update_source: None,
         }
     }
 }

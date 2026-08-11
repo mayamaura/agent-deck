@@ -41,6 +41,15 @@ export interface SyncSummary {
 export interface AppConfigDto {
   sharedAgentsSource: string | null;
   defaultModel: string | null;
+  updateSource: string | null;
+  currentVersion: string;
+}
+
+// src-tauri/src/main.rs UpdateInfoDto(check_for_updates の戻り値)
+export interface UpdateInfoDto {
+  version: string;
+  notes: string;
+  hashOk: boolean;
 }
 
 // src-tauri/src/config.rs AgentSettings

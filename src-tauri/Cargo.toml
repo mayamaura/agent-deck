@@ -1,7 +1,7 @@
 # バージョンは 2026-08-12 に crates.io で確認(docs/sdk-notes.md 参照)
 [package]
 name = "agent-deck"
-version = "0.1.0"
+version = "0.3.0"
 description = "Copilot エージェントに定型業務を依頼し、稼働状況をリアルタイム表示するデスクトップアプリ"
 edition = "2021"
 # 検証バイナリ(smoke / stepN_check)があるため、tauri dev の cargo run 対象を明示

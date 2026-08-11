@@ -10,6 +10,7 @@ import type {
   AppEvent,
   HistoryEntry,
   SyncSummary,
+  UpdateInfoDto,
 } from "./types";
 import { EVENT_CHANNEL } from "./types";
 import { buildTree } from "./tree";
@@ -207,6 +208,13 @@ export default function App() {
   const [syncResult, setSyncResult] = useState<SyncSummary | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
 
+  // アプリ本体の更新通知(docs/roadmap.md v0.3.0: 検知と通知のみ)。
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfoDto | null>(null);
+  const [updateDismissed, setUpdateDismissed] = useState(false);
+  const [updateSourceInput, setUpdateSourceInput] = useState("");
+  const [updateCheckError, setUpdateCheckError] = useState<string | null>(null);
+  const [openUpdateFolderError, setOpenUpdateFolderError] = useState<string | null>(null);
+
   // 応答済みの権限要求 requestId(docs/tree.ts の buildTree 第2引数)。
   const [respondedRequestIds, setRespondedRequestIds] = useState<Set<string>>(new Set());
   const [outputFolderError, setOutputFolderError] = useState<string | null>(null);
@@ -231,8 +239,13 @@ export default function App() {
       .then((c) => {
         setAppConfig(c);
         setSharedSourceInput(c.sharedAgentsSource ?? "");
+        setUpdateSourceInput(c.updateSource ?? "");
       })
       .catch((e) => setError(String(e)));
+    // 起動時の更新確認(docs/roadmap.md v0.3.0)。失敗しても静かに(UI には出さず console.error のみ)。
+    invoke<UpdateInfoDto | null>("check_for_updates")
+      .then(setUpdateInfo)
+      .catch((e) => console.error("更新確認に失敗しました:", e));
   }, []);
 
   // 選択中エージェントの定義(個人=編集可、共有=読み取り専用。docs/roadmap.md v0.2)。
@@ -474,6 +487,42 @@ export default function App() {
     }
   }
 
+  async function handlePickUpdateSource() {
+    const dir = await open({ directory: true });
+    if (typeof dir === "string") setUpdateSourceInput(dir);
+  }
+
+  async function handleSaveUpdateSource() {
+    setUpdateCheckError(null);
+    try {
+      const path = updateSourceInput.trim() || null;
+      await invoke("save_update_source", { path });
+      setAppConfig((c) => (c ? { ...c, updateSource: path } : c));
+    } catch (e) {
+      setUpdateCheckError(String(e));
+    }
+  }
+
+  async function handleCheckForUpdates() {
+    setUpdateCheckError(null);
+    try {
+      const info = await invoke<UpdateInfoDto | null>("check_for_updates");
+      setUpdateInfo(info);
+      setUpdateDismissed(false);
+    } catch (e) {
+      setUpdateCheckError(String(e));
+    }
+  }
+
+  async function handleOpenUpdateFolder() {
+    setOpenUpdateFolderError(null);
+    try {
+      await invoke("open_update_folder");
+    } catch (e) {
+      setOpenUpdateFolderError(String(e));
+    }
+  }
+
   async function handleOpenOutputFolder() {
     if (!selected) return;
     setOutputFolderError(null);
@@ -494,7 +543,31 @@ export default function App() {
   }
 
   return (
-    <div className="layout">
+    <>
+      {updateInfo && !updateDismissed && (
+        <div className={updateInfo.hashOk ? "update-banner" : "update-banner update-banner-danger"}>
+          <div className="update-banner-row">
+            <span className="update-banner-text">
+              新しいバージョン v{updateInfo.version} が利用可能です(現在 v
+              {appConfig?.currentVersion ?? "?"})。{updateInfo.notes}
+            </span>
+            {updateInfo.hashOk ? (
+              <button type="button" onClick={handleOpenUpdateFolder}>
+                配布フォルダを開く
+              </button>
+            ) : (
+              <span className="update-banner-warning">
+                ⚠ 配布物のハッシュが一致しません。適用しないでください
+              </span>
+            )}
+            <button type="button" onClick={() => setUpdateDismissed(true)} aria-label="閉じる">
+              ✕
+            </button>
+          </div>
+          {openUpdateFolderError && <p className="error">⚠ {openUpdateFolderError}</p>}
+        </div>
+      )}
+      <div className="layout">
       <aside className="pane agents">
         <h2>エージェント</h2>
         {error && <p className="error">⚠ {error}</p>}
@@ -701,6 +774,34 @@ export default function App() {
             </p>
           )}
         </div>
+        <div className="shared-settings">
+          <h3>更新配布フォルダ</h3>
+          <label>
+            配布フォルダ(manifest.json を置く場所)
+            <div className="folder-row">
+              <input
+                type="text"
+                value={updateSourceInput}
+                onChange={(e) => setUpdateSourceInput(e.target.value)}
+              />
+              <button type="button" onClick={handlePickUpdateSource}>
+                選択...
+              </button>
+            </div>
+          </label>
+          <div className="run-controls">
+            <button type="button" onClick={handleSaveUpdateSource}>
+              保存
+            </button>
+            <button type="button" onClick={handleCheckForUpdates} disabled={!appConfig?.updateSource}>
+              今すぐ確認
+            </button>
+          </div>
+          {updateCheckError && <p className="error">⚠ {updateCheckError}</p>}
+          {!updateInfo && !updateCheckError && (
+            <p className="muted">更新はありません(現在 v{appConfig?.currentVersion ?? "?"})</p>
+          )}
+        </div>
       </aside>
       <main className="pane run">
         <h2>実行ビュー</h2>
@@ -787,6 +888,7 @@ export default function App() {
             </li>
           ))}
         </ul>
+        <p className="muted app-version">agent-deck v{appConfig?.currentVersion ?? "?"}</p>
       </aside>
       <footer className="pane history">
         <h2>実行履歴</h2>
@@ -821,6 +923,7 @@ export default function App() {
           </table>
         )}
       </footer>
-    </div>
+      </div>
+    </>
   );
 }
