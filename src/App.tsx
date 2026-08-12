@@ -19,6 +19,15 @@ import { EVENT_CHANNEL } from "./types";
 import { buildTree } from "./tree";
 import type { AgentRow, TreeState } from "./tree";
 import { sessionSummary } from "./sessions";
+import {
+  AGENT_TOOL_OPTIONS,
+  PERMISSION_TOOL_OPTIONS,
+  composeAgentTools,
+  composePermissionTools,
+  decomposeAgentTools,
+  decomposePermissionTools,
+} from "./toolCatalog";
+import type { AgentToolsFormState, PermissionToolsFormState } from "./toolCatalog";
 
 // 実行ビュー上部のダッシュボード帯・タブに残す「直近の完了/失敗/中断セッション」件数の上限
 // (docs/roadmap.md v0.5: 実行中+直近数件のセッション)。実行中セッションは件数に含めない。
@@ -30,33 +39,41 @@ const NO_RESPONSES = new Set<string>();
 // 実行ビューはツリー表示(docs/requirements.md §3.3。このアプリの主目的)。
 // 生イベントの時系列ログ・トークン使用量・出力ファイルは詳細ペインへ移設。
 
-/** 設定フォームの編集用の状態。カンマ区切りテキストは保存時に配列へ分解する。 */
+/** 設定フォームの編集用の状態。許可/拒否ツールはチェック集合+その他テキストで持ち、
+ * 保存時に toolCatalog の compose 関数で配列へ結合する(スペルミス防止。ユーザー要望)。 */
 interface ConfigFormState {
   inputDir: string;
   outputDir: string;
-  allowedTools: string;
-  deniedTools: string;
+  allowedTools: PermissionToolsFormState;
+  deniedTools: PermissionToolsFormState;
   autoApprove: boolean;
 }
 
 const EMPTY_FORM: ConfigFormState = {
   inputDir: "",
   outputDir: "",
-  allowedTools: "",
-  deniedTools: "",
+  allowedTools: { checked: [], other: "" },
+  deniedTools: { checked: [], other: "" },
   autoApprove: true,
 };
 
-/** エージェント定義エディタ(個人スコープ)の編集用状態(docs/roadmap.md v0.2)。 */
+/** エージェント定義エディタ(個人スコープ)の編集用状態(docs/roadmap.md v0.2)。
+ * tools はチェック集合+その他テキスト+全ツール/選択の切り替えで持つ(スペルミス防止。ユーザー要望)。 */
 interface DefinitionFormState {
   name: string;
   description: string;
   model: string;
-  tools: string;
+  tools: AgentToolsFormState;
   body: string;
 }
 
-const EMPTY_DEF_FORM: DefinitionFormState = { name: "", description: "", model: "", tools: "", body: "" };
+const EMPTY_DEF_FORM: DefinitionFormState = {
+  name: "",
+  description: "",
+  model: "",
+  tools: { mode: "all", checked: [], other: "" },
+  body: "",
+};
 
 /** スケジュール追加・編集フォームの状態(docs/roadmap.md v0.4)。周期の種類ごとの
  * フィールド(weekday/day)は保存時に選択中の type のものだけを Recurrence へ詰める。 */
@@ -101,13 +118,6 @@ const TRIGGER_LABEL: Record<HistoryEntry["trigger"], string> = {
   manual: "🖐 手動",
   scheduled: "⏰ 定期",
 };
-
-function splitList(text: string): string[] {
-  return text
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
 
 /** イベント 1 件を短い日本語要約にする(詳細ペインの時系列ログ用)。 */
 function summarize(ev: AppEvent): string {
@@ -315,6 +325,52 @@ function AgentRowView({
   );
 }
 
+/** 入出力設定の許可/拒否ツール入力欄。基本形はチェックボックス(スペルミス防止。ユーザー要望)、
+ * 括弧付きパターン等は「高度なパターン」欄に手入力する。 */
+function PermissionToolsField({
+  label,
+  advancedHint,
+  state,
+  onChange,
+  showNotes,
+}: {
+  label: string;
+  advancedHint: string;
+  state: PermissionToolsFormState;
+  onChange: (next: PermissionToolsFormState) => void;
+  showNotes?: boolean;
+}) {
+  return (
+    <div className="tools-field">
+      <span className="tools-field-label">{label}</span>
+      {PERMISSION_TOOL_OPTIONS.map((opt) => (
+        <div key={opt.value}>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={state.checked.includes(opt.value)}
+              onChange={(e) =>
+                onChange({
+                  ...state,
+                  checked: e.target.checked
+                    ? [...state.checked, opt.value]
+                    : state.checked.filter((v) => v !== opt.value),
+                })
+              }
+            />
+            {opt.label}({opt.value})
+          </label>
+          {showNotes && opt.note && <p className="muted hint">{opt.note}</p>}
+        </div>
+      ))}
+      <label>
+        高度なパターン(手入力・カンマ区切り。例: {advancedHint})
+        <input type="text" value={state.other} onChange={(e) => onChange({ ...state, other: e.target.value })} />
+      </label>
+    </div>
+  );
+}
+
 export default function App() {
   const [agents, setAgents] = useState<AgentSummary[]>([]);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
@@ -433,7 +489,7 @@ export default function App() {
           name: d.name,
           description: d.description,
           model: d.model ?? "",
-          tools: (d.tools ?? []).join(", "),
+          tools: decomposeAgentTools(d.tools),
           body: d.body,
         });
         setDefSaveStatus(null);
@@ -464,8 +520,8 @@ export default function App() {
     setForm({
       inputDir: c?.inputDir ?? "",
       outputDir: c?.outputDir ?? "",
-      allowedTools: c?.allowedTools.join(", ") ?? "",
-      deniedTools: c?.deniedTools.join(", ") ?? "",
+      allowedTools: decomposePermissionTools(c?.allowedTools ?? []),
+      deniedTools: decomposePermissionTools(c?.deniedTools ?? []),
       autoApprove: c?.autoApproveWriteInOutputDir ?? true,
     });
     setSaveStatus(null);
@@ -620,8 +676,8 @@ export default function App() {
     const settings: AgentSettings = {
       inputDir: form.inputDir.trim() || null,
       outputDir: form.outputDir.trim() || null,
-      allowedTools: splitList(form.allowedTools),
-      deniedTools: splitList(form.deniedTools),
+      allowedTools: composePermissionTools(form.allowedTools),
+      deniedTools: composePermissionTools(form.deniedTools),
       autoApproveWriteInOutputDir: form.autoApprove,
     };
     try {
@@ -663,7 +719,7 @@ export default function App() {
         agentId: selected,
         name: defForm.name,
         description: defForm.description,
-        tools: defForm.tools.trim() ? splitList(defForm.tools) : null,
+        tools: composeAgentTools(defForm.tools),
         model: defForm.model.trim() || null,
         body: defForm.body,
       });
@@ -699,7 +755,7 @@ export default function App() {
         name: d.name,
         description: d.description,
         model: d.model ?? "",
-        tools: (d.tools ?? []).join(", "),
+        tools: decomposeAgentTools(d.tools),
         body: d.body,
       });
     } catch (e) {
@@ -1008,14 +1064,61 @@ export default function App() {
                     onChange={(e) => setDefForm((f) => ({ ...f, model: e.target.value }))}
                   />
                 </label>
-                <label>
-                  ツール(カンマ区切り。空欄で全ツール)
-                  <input
-                    type="text"
-                    value={defForm.tools}
-                    onChange={(e) => setDefForm((f) => ({ ...f, tools: e.target.value }))}
-                  />
-                </label>
+                <div className="tools-field">
+                  <span className="tools-field-label">ツール</span>
+                  <label className="radio-row">
+                    <input
+                      type="radio"
+                      name="def-tools-mode"
+                      checked={defForm.tools.mode === "all"}
+                      onChange={() => setDefForm((f) => ({ ...f, tools: { ...f.tools, mode: "all" } }))}
+                    />
+                    全ツール(既定)
+                  </label>
+                  <label className="radio-row">
+                    <input
+                      type="radio"
+                      name="def-tools-mode"
+                      checked={defForm.tools.mode === "selected"}
+                      onChange={() => setDefForm((f) => ({ ...f, tools: { ...f.tools, mode: "selected" } }))}
+                    />
+                    選択したツールのみ
+                  </label>
+                  {defForm.tools.mode === "selected" && (
+                    <>
+                      {AGENT_TOOL_OPTIONS.map((opt) => (
+                        <label key={opt.value} className="checkbox-row">
+                          <input
+                            type="checkbox"
+                            checked={defForm.tools.checked.includes(opt.value)}
+                            onChange={(e) =>
+                              setDefForm((f) => ({
+                                ...f,
+                                tools: {
+                                  ...f.tools,
+                                  checked: e.target.checked
+                                    ? [...f.tools.checked, opt.value]
+                                    : f.tools.checked.filter((v) => v !== opt.value),
+                                },
+                              }))
+                            }
+                          />
+                          {opt.label}({opt.value})
+                        </label>
+                      ))}
+                      <label>
+                        その他(手入力・カンマ区切り。認識できない名前は Copilot 側で無視されます)
+                        <input
+                          type="text"
+                          value={defForm.tools.other}
+                          onChange={(e) =>
+                            setDefForm((f) => ({ ...f, tools: { ...f.tools, other: e.target.value } }))
+                          }
+                        />
+                      </label>
+                    </>
+                  )}
+                </div>
                 <label>
                   本文(Instructions)
                   <textarea
@@ -1068,22 +1171,19 @@ export default function App() {
                 </button>
               </div>
             </label>
-            <label>
-              許可ツール(カンマ区切り。例: write, shell(python:*))
-              <input
-                type="text"
-                value={form.allowedTools}
-                onChange={(e) => updateForm({ allowedTools: e.target.value })}
-              />
-            </label>
-            <label>
-              拒否ツール(カンマ区切り。例: shell(rm))
-              <input
-                type="text"
-                value={form.deniedTools}
-                onChange={(e) => updateForm({ deniedTools: e.target.value })}
-              />
-            </label>
+            <PermissionToolsField
+              label="許可ツール"
+              advancedHint="shell(python:*)"
+              state={form.allowedTools}
+              onChange={(next) => updateForm({ allowedTools: next })}
+              showNotes
+            />
+            <PermissionToolsField
+              label="拒否ツール"
+              advancedHint="shell(rm)"
+              state={form.deniedTools}
+              onChange={(next) => updateForm({ deniedTools: next })}
+            />
             <label className="checkbox-row">
               <input
                 type="checkbox"
