@@ -22,6 +22,7 @@ npm run tauri dev
 | 文書 | 内容 |
 |---|---|
 | [docs/user-guide.md](docs/user-guide.md) | **利用者向け操作ガイド**(非エンジニア向け) |
+| [docs/positioning.md](docs/positioning.md) | 素の Copilot CLI / VS Code との違いと使い分け(導入判断用) |
 | [docs/requirements.md](docs/requirements.md) | 要求仕様: 目的・スコープ・画面・受け入れ条件 |
 | [docs/architecture.md](docs/architecture.md) | 設計: 責務分割・IPC・イベント・データモデル・権限制御・設計原則 |
 | [docs/development.md](docs/development.md) | 開発ガイド: 環境構築・コマンド・実装ステップと進捗 |

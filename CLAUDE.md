@@ -12,6 +12,7 @@ Copilot エージェントに定型業務を依頼し、稼働状況をリアル
 | SDK / CLI / Tauri の API 実態(実機検証済み) | [docs/sdk-notes.md](docs/sdk-notes.md) |
 | 決めてよいこと・いけないこと | [docs/open-questions.md](docs/open-questions.md) |
 | 将来の拡張と塞いではいけない点 | [docs/roadmap.md](docs/roadmap.md) |
+| 素の Copilot との違い・機能を足す前の確認 | [docs/positioning.md](docs/positioning.md) |
 
 初期仕様書は docs/ に分割済み。原本アーカイブは
 [docs/archive/agent-deck-spec.md](docs/archive/agent-deck-spec.md)(参照のみ、編集しない)。
