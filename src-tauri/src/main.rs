@@ -51,6 +51,9 @@ struct AppState {
     /// respond_permission コマンドと copilot::run_task の PermissionHandler を橋渡しする
     /// (docs/architecture.md §7.1)。
     bridge: std::sync::Arc<copilot::PermissionBridge>,
+    /// respond_user_input コマンドと copilot::run_task の UserInputHandler を橋渡しする
+    /// (v1.0: エージェントからの質問への回答、経路A)。
+    user_input_bridge: std::sync::Arc<copilot::UserInputBridge>,
     /// スケジュール実行の待機キュー(docs/roadmap.md v0.4)。
     queue: Mutex<VecDeque<QueuedRun>>,
 }
@@ -439,6 +442,19 @@ fn start_task(app: tauri::AppHandle, agent_id: String, prompt: String) -> Result
     spawn_task(app, agent_id, prompt, "manual", false)
 }
 
+/// タスク完了後の追い返信(v1.0 経路B: docs/sdk-notes.md「セッション再開」節)。
+/// 同じ session_id を resume_session_id として spawn_task_inner に渡す。実行中のセッションは
+/// resume の対象にできない(継続すべき送信がまだ終わっていない)ため先に拒否する。
+#[tauri::command]
+fn reply_task(app: tauri::AppHandle, session_id: String, agent_id: String, message: String) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let already_running = state.running.lock().unwrap().values().any(|t| t.session_id == session_id);
+    if already_running {
+        return Err("実行中のセッションには返信できません".to_string());
+    }
+    spawn_task_inner(app, agent_id, message, "manual", false, Some(session_id))
+}
+
 /// 手動実行(start_task)とスケジュール実行(スケジューラループ)の共通処理
 /// (docs/roadmap.md v0.4)。エージェント定義解決 → TaskSpec 構築 → 実行の spawn まで行う。
 /// trigger は履歴の trigger 欄("manual"/"scheduled")、unattended は無人実行フラグ
@@ -449,6 +465,20 @@ fn spawn_task(
     prompt: String,
     trigger: &'static str,
     unattended: bool,
+) -> Result<(), String> {
+    spawn_task_inner(app, agent_id, prompt, trigger, unattended, None)
+}
+
+/// spawn_task / reply_task の共通本体(v1.0: 追い返信のため抽出)。resume_session_id が
+/// Some なら TaskSpec に載せ、copilot::run_task が create_session ではなく resume_session を使う
+/// (docs/sdk-notes.md「セッション再開」節)。
+fn spawn_task_inner(
+    app: tauri::AppHandle,
+    agent_id: String,
+    prompt: String,
+    trigger: &'static str,
+    unattended: bool,
+    resume_session_id: Option<String>,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
 
@@ -544,8 +574,10 @@ fn spawn_task(
         session_model: cfg.default_model.clone(),
         rules,
         bridge: state.bridge.clone(),
+        user_input_bridge: state.user_input_bridge.clone(),
         unattended,
         logs_dir: logs_dir.clone(),
+        resume_session_id,
     };
 
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
@@ -817,6 +849,12 @@ fn respond_permission(state: State<AppState>, request_id: String, decision: Stri
     state.bridge.respond(&request_id, reply)
 }
 
+/// ask_user への回答(v1.0 経路A)。answer=None は「回答しない」(SDK へは「回答なし」を返す)。
+#[tauri::command]
+fn respond_user_input(state: State<AppState>, request_id: String, answer: Option<String>) -> Result<(), String> {
+    state.user_input_bridge.respond(&request_id, answer)
+}
+
 fn main() {
     tauri::Builder::default()
         // フォルダ選択ダイアログ用(docs/requirements.md §3.4)。
@@ -828,6 +866,7 @@ fn main() {
             running: Mutex::new(HashMap::new()),
             next_run_id: AtomicU64::new(1),
             bridge: copilot::PermissionBridge::new(),
+            user_input_bridge: copilot::UserInputBridge::new(),
             queue: Mutex::new(VecDeque::new()),
         })
         .setup(|app| {
@@ -872,8 +911,10 @@ fn main() {
             open_output_folder,
             open_logs_folder,
             start_task,
+            reply_task,
             cancel_task,
             respond_permission,
+            respond_user_input,
             list_schedules,
             save_schedule,
             delete_schedule,

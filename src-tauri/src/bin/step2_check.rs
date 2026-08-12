@@ -81,8 +81,10 @@ async fn main() {
         session_model: None,
         rules: config::AgentSettings::default(),
         bridge: copilot::PermissionBridge::new(),
+        user_input_bridge: copilot::UserInputBridge::new(),
         unattended: false,
         logs_dir,
+        resume_session_id: None,
     };
     let run = tokio::spawn(copilot::run_task(cli_path, spec, cancel_rx, sink));
 

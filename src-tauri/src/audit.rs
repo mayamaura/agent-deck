@@ -37,6 +37,13 @@ impl AuditWriter {
         self.append_line(session_id, rec);
     }
 
+    /// ask_user への応答結果を1行追記する(v1.0: 経路A)。UserInputRequested の AppEvent 自体は
+    /// record_event で記録されるため、これは最終判定(回答した/しなかった)のみを記す別記録
+    /// (record_permission と同じ設計)。
+    pub fn record_user_input(&self, session_id: &str, rec: &UserInputAudit) {
+        self.append_line(session_id, rec);
+    }
+
     /// 書き込み失敗は eprintln のみに留め、タスクの実行は止めない
     /// (監査ログの欠落自体はタスクの成否とは無関係。呼び出し側の指示どおり)。
     /// ponytail: 1呼び出しごとに open/close する簡易実装(history::append と同じ方式)。
@@ -74,6 +81,17 @@ pub struct PermissionAudit {
     pub tool_name: String,
     pub detail: Option<String>,
     pub write_path: Option<String>,
+}
+
+/// ask_user への応答 1 件分の監査記録(docs/sdk-notes.md「ユーザー入力」節、v1.0)。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInputAudit {
+    pub timestamp: String,
+    /// userAnswered / userDeclined / unattendedNoAnswer
+    pub decision: String,
+    pub question: String,
+    pub answer: Option<String>,
 }
 
 /// 成果物の来歴(docs/roadmap.md v0.6)。タスク完了時(RunOutcome 確定後)に main.rs が

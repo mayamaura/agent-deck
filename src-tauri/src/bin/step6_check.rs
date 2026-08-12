@@ -117,8 +117,10 @@ async fn run_task_and_collect(
         session_model: None,
         rules,
         bridge: bridge.clone(),
+        user_input_bridge: copilot::UserInputBridge::new(),
         unattended: false,
         logs_dir,
+        resume_session_id: None,
     };
     let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
@@ -296,8 +298,10 @@ async fn run_round_b(cli_path: PathBuf, ws: PathBuf, temp_data: PathBuf) -> bool
         session_model: None,
         rules: config::AgentSettings::default(),
         bridge: copilot::PermissionBridge::new(),
+        user_input_bridge: copilot::UserInputBridge::new(),
         unattended: false,
         logs_dir,
+        resume_session_id: None,
     };
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();

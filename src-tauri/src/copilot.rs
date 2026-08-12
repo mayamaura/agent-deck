@@ -8,7 +8,9 @@
 use crate::audit;
 use crate::events::AppEvent;
 use crate::permissions;
-use github_copilot_sdk::handler::{PermissionHandler, PermissionResult};
+use github_copilot_sdk::handler::{
+    PermissionHandler, PermissionResult, UserInputHandler, UserInputResponse,
+};
 use github_copilot_sdk::session_events::{
     AssistantIntentData, AssistantMessageData, AssistantUsageData, SessionErrorData,
     SessionIdleData, SessionUsageInfoData, SubagentCompletedData, SubagentFailedData,
@@ -16,7 +18,7 @@ use github_copilot_sdk::session_events::{
 };
 use github_copilot_sdk::types::{
     CustomAgentConfig, MessageOptions, PermissionRequestData, PermissionRequestKind, RequestId,
-    SessionConfig, SessionEvent, SessionId,
+    ResumeSessionConfig, SessionConfig, SessionEvent, SessionId,
 };
 use github_copilot_sdk::{CliProgram, Client, ClientOptions};
 use std::collections::HashMap;
@@ -71,13 +73,22 @@ pub struct TaskSpec {
     pub rules: permissions::PermissionRules,
     /// respond_permission コマンドと run_task の PermissionHandler を橋渡しする。
     pub bridge: Arc<PermissionBridge>,
+    /// respond_user_input コマンドと run_task の UserInputHandler を橋渡しする(v1.0 経路A)。
+    pub user_input_bridge: Arc<UserInputBridge>,
     /// 無人実行(スケジュール実行)か(docs/roadmap.md v0.4)。true のとき、Ask になった
     /// 権限要求は PermissionRequested を emit せず即座に拒否して実行全体を中断する
-    /// (無人実行と承認ダイアログは両立しないため)。
+    /// (無人実行と承認ダイアログは両立しないため)。ask_user の質問も同じ理由で emit せず
+    /// 即座に「回答なし」を返す(v1.0)。
     pub unattended: bool,
     /// 監査ログ(data/logs/)の置き場(docs/roadmap.md v0.6)。AuditWriter の生成に使う。
     /// ディレクトリの存在確認・作成は呼び出し側(main.rs)の責務。
     pub logs_dir: PathBuf,
+    /// Some なら「タスク完了後の追い返信」(v1.0 経路B): create_session ではなく
+    /// resume_session でこの session_id のセッションを再開する。SDK は resume を
+    /// 前回設定への差分適用として扱わないため(docs/sdk-notes.md「セッション再開」節)、
+    /// run_task は custom_agents/agent/working_directory/model/各ハンドラを
+    /// ResumeSessionConfig にも同じように再指定する。
+    pub resume_session_id: Option<String>,
 }
 
 /// respond_permission コマンドの応答種別(承認ダイアログの3択。docs/architecture.md §7.1 拡張)。
@@ -126,6 +137,49 @@ impl PermissionBridge {
 
     /// タスク終了時の後始末(run_task の最後で呼ぶ)。未応答分の oneshot は
     /// Drop で自然にキャンセルされる(受信側の await は Err で解決する)。
+    fn clear(&self) {
+        self.pending.lock().unwrap().clear();
+    }
+}
+
+/// UI からの ask_user 回答を届けるブリッジ(PermissionBridge と同型設計。v1.0 経路A)。
+///
+/// PermissionBridge と異なり、request_id は SDK から受け取れない。SDK 実ソース
+/// (github-copilot-sdk-1.0.9/src/handler.rs)の `UserInputHandler::handle` シグネチャには
+/// request_id 引数が無く、`session.rs` の `userInput.request` RPC ディスパッチでも渡されない
+/// (docs/sdk-notes.md の想定「SDK から来る RequestId を文字列化」とは食い違う。ブロードキャスト
+/// される `user_input.requested` イベントには request_id があるが、session.rs のコメントで
+/// 「観測専用で、ハンドラ呼び出しとは別経路(二重発火防止のため関連付けない)」と明記されている)。
+/// そのため request_id は UiUserInputHandler 側で採番し、このブリッジのキーに使う。
+pub struct UserInputBridge {
+    pending: std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<Option<String>>>>,
+}
+
+impl UserInputBridge {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self { pending: std::sync::Mutex::new(HashMap::new()) })
+    }
+
+    /// UI から届いた回答を該当タスクへ届ける。None = 回答しない(SDK へは「回答なし」を返す)。
+    /// 存在しない request_id はエラーにする(docs/development.md §3: エラーを握りつぶさない)。
+    pub fn respond(&self, request_id: &str, answer: Option<String>) -> Result<(), String> {
+        let tx = self
+            .pending
+            .lock()
+            .unwrap()
+            .remove(request_id)
+            .ok_or_else(|| format!("不明な質問要求です(既に応答済みか、対象タスクが終了しています): {request_id}"))?;
+        let _ = tx.send(answer);
+        Ok(())
+    }
+
+    fn register(&self, request_id: String) -> tokio::sync::oneshot::Receiver<Option<String>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending.lock().unwrap().insert(request_id, tx);
+        rx
+    }
+
+    /// タスク終了時の後始末(run_task の最後で呼ぶ)。PermissionBridge::clear と同じ設計。
     fn clear(&self) {
         self.pending.lock().unwrap().clear();
     }
@@ -404,6 +458,104 @@ impl PermissionHandler for UiPermissionHandler {
                             PermissionResult::reject("応答を受信できなかったため拒否しました".to_string())
                         }
                     }
+                }
+            }
+        })
+    }
+}
+
+/// UserInputAudit を組み立てる(UiUserInputHandler::handle の3判定経路で共通して使う。
+/// permission_audit と同じ設計)。
+fn user_input_audit(question: &str, decision: &str, answer: Option<&str>) -> audit::UserInputAudit {
+    audit::UserInputAudit {
+        timestamp: format_rfc3339_now(),
+        decision: decision.to_string(),
+        question: question.to_string(),
+        answer: answer.map(str::to_string),
+    }
+}
+
+/// ask_user ツールに応答する自前の UserInputHandler(docs/sdk-notes.md「ユーザー入力」節、v1.0)。
+/// 未登録だと ask_user ツール自体が無効化されるため、run_task は必ず登録する。
+/// UiPermissionHandler と同じ理由(async-trait クレートを新規依存にしないため)で、
+/// マクロが生成するのと同じ `Pin<Box<dyn Future>>` を返す形を手で書く。
+struct UiUserInputHandler {
+    bridge: Arc<UserInputBridge>,
+    sink: Arc<dyn Fn(AppEvent) + Send + Sync>,
+    /// request_id 採番用(UserInputBridge のコメント参照: SDK は handle() に request_id を
+    /// 渡さないため、このハンドラのインスタンス内で連番を振る)。
+    next_request_id: std::sync::atomic::AtomicU64,
+    /// 無人実行フラグ(docs/roadmap.md v0.4 と同じ理由)。true のときは UI に出さず
+    /// 即座に「回答なし」を返す(質問で夜間実行が止まらないように)。
+    unattended: bool,
+    audit: Arc<audit::AuditWriter>,
+}
+
+impl UserInputHandler for UiUserInputHandler {
+    fn handle<'life0, 'async_trait>(
+        &'life0 self,
+        session_id: SessionId,
+        question: String,
+        choices: Option<Vec<String>>,
+        allow_freeform: Option<bool>,
+    ) -> Pin<Box<dyn Future<Output = Option<UserInputResponse>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            let session_id_str = session_id.to_string();
+            let choices = choices.unwrap_or_default();
+            // SDK が allow_freeform を返さない場合の既定値: 選択肢が無ければ自由入力以外に
+            // 回答手段が無いので true、選択肢があれば「選択肢のみ」を既定にする(false)。
+            let allow_freeform = allow_freeform.unwrap_or(choices.is_empty());
+
+            if self.unattended {
+                self.audit.record_user_input(
+                    &session_id_str,
+                    &user_input_audit(&question, "unattendedNoAnswer", None),
+                );
+                return None;
+            }
+
+            let request_id = format!(
+                "ui-{}",
+                self.next_request_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            );
+            let event = AppEvent::UserInputRequested {
+                session_id: session_id_str.clone(),
+                request_id: request_id.clone(),
+                question: question.clone(),
+                choices: choices.clone(),
+                allow_freeform,
+            };
+            self.audit.record_event(&session_id_str, &event);
+            (self.sink)(event);
+
+            let rx = self.bridge.register(request_id);
+            match rx.await {
+                Ok(Some(answer)) => {
+                    let was_freeform = !choices.iter().any(|c| c == &answer);
+                    self.audit.record_user_input(
+                        &session_id_str,
+                        &user_input_audit(&question, "userAnswered", Some(&answer)),
+                    );
+                    Some(UserInputResponse { answer, was_freeform })
+                }
+                Ok(None) => {
+                    self.audit.record_user_input(
+                        &session_id_str,
+                        &user_input_audit(&question, "userDeclined", None),
+                    );
+                    None
+                }
+                Err(_) => {
+                    // 応答が届く前に送信側が消えた(タスク終了等)。安全側に倒して回答なしを返す。
+                    self.audit.record_user_input(
+                        &session_id_str,
+                        &user_input_audit(&question, "userDeclined", None),
+                    );
+                    None
                 }
             }
         })
@@ -873,6 +1025,7 @@ pub async fn run_task(
     // 同じ関数を共有させる。
     let sink: Arc<dyn Fn(AppEvent) + Send + Sync> = Arc::new(sink);
     let bridge = spec.bridge.clone();
+    let user_input_bridge = spec.user_input_bridge.clone();
     // ユーザーが権限要求を拒否した(または無人実行で自動拒否した)際に、PermissionHandler から
     // select ループへ中断を伝える経路。送る値はそのまま TaskFailed.error の文言に使う。
     let (deny_abort_tx, mut deny_abort_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -894,6 +1047,13 @@ pub async fn run_task(
         unattended: spec.unattended,
         audit: Arc::clone(&audit),
     });
+    let user_input_handler = Arc::new(UiUserInputHandler {
+        bridge: user_input_bridge.clone(),
+        sink: Arc::clone(&sink),
+        next_request_id: std::sync::atomic::AtomicU64::new(1),
+        unattended: spec.unattended,
+        audit: Arc::clone(&audit),
+    });
 
     // rules.denied_tools のうち括弧を含まない単純名(例 "write")は SessionConfig の
     // excluded_tools にも渡し、多重に防御する(docs/sdk-notes.md「ツール制限」節: excluded_tools
@@ -902,26 +1062,52 @@ pub async fn run_task(
         spec.rules.denied_tools.iter().filter(|t| !t.contains('(')).cloned().collect();
 
     let custom_agents: Vec<CustomAgentConfig> = spec.agents.iter().map(to_custom_agent_config).collect();
-    let mut config = SessionConfig::default()
-        .with_permission_handler(permission_handler)
-        .with_custom_agents(custom_agents)
-        .with_agent(spec.selected_agent_name.clone())
-        .with_working_directory(spec.working_directory.clone());
-    if !simple_denied.is_empty() {
-        config = config.with_excluded_tools(simple_denied);
-    }
-    if let Some(model) = &spec.session_model {
-        config = config.with_model(model.clone());
-    }
 
-    let session = match client.create_session(config).await {
+    // 新規セッション(create_session)か、完了後の追い返信(resume_session、v1.0 経路B)かで
+    // 分岐する。resume は「前回設定への差分適用」ではないため(docs/sdk-notes.md「セッション再開」
+    // 節)、SessionConfig と同じ設定(custom_agents/agent/working_directory/model/両ハンドラ)を
+    // ResumeSessionConfig にもそのまま再指定し、with_continue_pending_work(true) を付ける。
+    let session_result = if let Some(resume_id) = &spec.resume_session_id {
+        let mut config = ResumeSessionConfig::new(SessionId::from(resume_id.clone()))
+            .with_permission_handler(permission_handler)
+            .with_user_input_handler(user_input_handler)
+            .with_custom_agents(custom_agents)
+            .with_agent(spec.selected_agent_name.clone())
+            .with_working_directory(spec.working_directory.clone())
+            .with_continue_pending_work(true);
+        if !simple_denied.is_empty() {
+            config = config.with_excluded_tools(simple_denied);
+        }
+        if let Some(model) = &spec.session_model {
+            config = config.with_model(model.clone());
+        }
+        client.resume_session(config).await
+    } else {
+        let mut config = SessionConfig::default()
+            .with_permission_handler(permission_handler)
+            .with_user_input_handler(user_input_handler)
+            .with_custom_agents(custom_agents)
+            .with_agent(spec.selected_agent_name.clone())
+            .with_working_directory(spec.working_directory.clone());
+        if !simple_denied.is_empty() {
+            config = config.with_excluded_tools(simple_denied);
+        }
+        if let Some(model) = &spec.session_model {
+            config = config.with_model(model.clone());
+        }
+        client.create_session(config).await
+    };
+
+    let session = match session_result {
         Ok(s) => s,
         Err(e) => {
             if let Err(stop_err) = client.stop().await {
                 eprintln!("Client の停止に失敗しました: {stop_err}");
             }
             bridge.clear();
-            return Err(with_hint(&format!("セッションを作成できません: {e}")));
+            user_input_bridge.clear();
+            let verb = if spec.resume_session_id.is_some() { "再開" } else { "作成" };
+            return Err(with_hint(&format!("セッションを{verb}できません: {e}")));
         }
     };
 
@@ -1019,8 +1205,9 @@ pub async fn run_task(
     if let Err(e) = client.stop().await {
         eprintln!("Client の停止に失敗しました: {e}");
     }
-    // 未応答の承認要求が残っていれば破棄する(oneshot の Drop で受信側は自然にキャンセルされる)。
+    // 未応答の承認要求・質問要求が残っていれば破棄する(oneshot の Drop で受信側は自然にキャンセルされる)。
     bridge.clear();
+    user_input_bridge.clear();
 
     // terminal_status が既にあれば convert() が emit した終端 AppEvent(TaskCompleted/Failed/
     // Cancelled)をそのまま採用する。無ければ(DRAIN_TIMEOUT 内に session.idle 等の

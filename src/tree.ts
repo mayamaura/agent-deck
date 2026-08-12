@@ -30,6 +30,14 @@ export interface AgentRow {
     // null なら App.tsx はボタンを出さない(write は無条件許可を提案しない設計)。
     suggestedPattern: string | null;
   }[];
+  // エージェントが ask_user ツールで質問した(v1.0 経路A)。pendingPermissions と同じ
+  // 「直近に活動した行」ヒューリスティックで所有行を決める。
+  pendingUserInputs: {
+    requestId: string;
+    question: string;
+    choices: string[];
+    allowFreeform: boolean;
+  }[];
 }
 
 export interface TreeState {
@@ -55,6 +63,7 @@ function newRow(key: string, label: string, isMain: boolean): AgentRow {
     totalTokens: null,
     error: null,
     pendingPermissions: [],
+    pendingUserInputs: [],
   };
 }
 
@@ -191,6 +200,17 @@ export function buildTree(events: AppEvent[], respondedRequestIds: ReadonlySet<s
             permissionKind: ev.permissionKind,
             detail: ev.detail,
             suggestedPattern: ev.suggestedPattern,
+          });
+        }
+        break;
+      }
+      case "userInputRequested": {
+        if (!respondedRequestIds.has(ev.requestId)) {
+          rowByKey(state, activeKey, activeKey).pendingUserInputs.push({
+            requestId: ev.requestId,
+            question: ev.question,
+            choices: ev.choices,
+            allowFreeform: ev.allowFreeform,
           });
         }
         break;

@@ -159,6 +159,10 @@ session.background_tasks_changed
 - `UserInputHandler` トレイト:
   `handle(&self, session_id, question: String, choices: Option<Vec<String>>, allow_freeform: Option<bool>) -> Option<UserInputResponse { answer, was_freeform }>`
   `SessionConfig::with_user_input_handler(Arc<dyn UserInputHandler>)` で登録
+- **注意(実装で確認)**: `handle` は request_id を**受け取らない**。ブロードキャストの
+  `user_input.requested` イベントにある request_id はハンドラ呼び出しと関連付けられない観測専用
+  (二重発火防止のため別経路と SDK コメントに明記)。UI との橋渡し ID はアプリ側で採番する
+  (copilot.rs の UiUserInputHandler 参照)
 - **登録しないと `ask_user` ツール自体が無効化される**(wire に `requestUserInput: false`)。
   つまりハンドラ未登録 = エージェントは質問できない
 - 応答はハンドラの戻り値で完結(CLI → SDK の JSON-RPC に SDK が自動応答)。`None` = 「回答なし」

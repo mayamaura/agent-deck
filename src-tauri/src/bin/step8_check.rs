@@ -146,8 +146,10 @@ async fn run_and_collect(cli_path: &PathBuf, ws: &PathBuf, agent: copilot::Agent
         session_model: None,
         rules: config::AgentSettings::default(),
         bridge: bridge.clone(),
+        user_input_bridge: copilot::UserInputBridge::new(),
         unattended: false,
         logs_dir,
+        resume_session_id: None,
     };
     let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
@@ -287,6 +289,7 @@ fn event_session_id(ev: &AppEvent) -> &str {
         | AppEvent::TaskCompleted { session_id, .. }
         | AppEvent::TaskFailed { session_id, .. }
         | AppEvent::AllowRuleAdded { session_id, .. }
+        | AppEvent::UserInputRequested { session_id, .. }
         | AppEvent::TaskCancelled { session_id } => session_id.as_str(),
     }
 }

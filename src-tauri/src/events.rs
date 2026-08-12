@@ -95,4 +95,15 @@ pub enum AppEvent {
         agent_id: Option<String>,
         pattern: String,
     },
+    /// エージェントが ask_user ツールで質問した(v1.0: 経路A、docs/sdk-notes.md「ユーザー入力」節)。
+    /// request_id は SDK の UserInputHandler::handle が受け取らない(request_id 引数が無い。
+    /// sdk-notes.md の想定と食い違う。copilot.rs UiUserInputHandler が独自採番する)。
+    /// choices が空なら自由入力のみ(フロントは選択肢ボタンを出さない)。
+    UserInputRequested {
+        session_id: String,
+        request_id: String,
+        question: String,
+        choices: Vec<String>,
+        allow_freeform: bool,
+    },
 }

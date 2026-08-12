@@ -140,6 +140,8 @@ function summarize(ev: AppEvent): string {
       return "タスク中断";
     case "allowRuleAdded":
       return `常に許可を登録しました: ${ev.pattern}`;
+    case "userInputRequested":
+      return `質問: ${ev.question}`;
   }
 }
 
@@ -213,16 +215,56 @@ function elapsedMsFor(row: AgentRow, rowStartedAt: Record<string, number>, nowTi
  * decision 引数と同じ文字列(Rust 側で copilot::PermissionReply に変換される)。 */
 type PermissionDecision = "approveOnce" | "approveAlways" | "deny";
 
+/** ask_user への回答カード(v1.0 経路A)。choices があれば選択ボタン、allowFreeform なら
+ * 自由入力欄+送信ボタンも出す。「回答しない」は常に出す(answer=null で respond_user_input へ)。 */
+function UserInputRowView({
+  q,
+  onRespond,
+}: {
+  q: AgentRow["pendingUserInputs"][number];
+  onRespond: (requestId: string, answer: string | null) => void;
+}) {
+  const [freeform, setFreeform] = useState("");
+  return (
+    <div className="permission-dialog">
+      <span>❓ 質問: {q.question}</span>
+      {q.choices.map((choice) => (
+        <button type="button" key={choice} onClick={() => onRespond(q.requestId, choice)}>
+          {choice}
+        </button>
+      ))}
+      {q.allowFreeform && (
+        <>
+          <input
+            type="text"
+            value={freeform}
+            onChange={(e) => setFreeform(e.target.value)}
+            placeholder="自由回答"
+          />
+          <button type="button" onClick={() => onRespond(q.requestId, freeform)} disabled={!freeform.trim()}>
+            送信
+          </button>
+        </>
+      )}
+      <button type="button" onClick={() => onRespond(q.requestId, null)}>
+        回答しない
+      </button>
+    </div>
+  );
+}
+
 function AgentRowView({
   row,
   elapsedMs,
   isSub,
   onRespond,
+  onRespondUserInput,
 }: {
   row: AgentRow;
   elapsedMs: number | null;
   isSub: boolean;
   onRespond: (requestId: string, decision: PermissionDecision) => void;
+  onRespondUserInput: (requestId: string, answer: string | null) => void;
 }) {
   return (
     <div className={isSub ? "agent-row sub" : "agent-row"}>
@@ -265,6 +307,9 @@ function AgentRowView({
           </button>
           {p.suggestedPattern && <span className="muted">以後 {p.suggestedPattern} を自動承認します</span>}
         </div>
+      ))}
+      {row.pendingUserInputs.map((q) => (
+        <UserInputRowView key={q.requestId} q={q} onRespond={onRespondUserInput} />
       ))}
     </div>
   );
@@ -317,6 +362,10 @@ export default function App() {
   const [scheduleError, setScheduleError] = useState<string | null>(null);
   const [scheduleSaveStatus, setScheduleSaveStatus] = useState<string | null>(null);
   const [queueStatus, setQueueStatus] = useState<QueueStatusDto | null>(null);
+
+  // タスク完了後の追い返信(v1.0 経路B)。タブを切り替えたら前のタブの下書きは持ち越さない。
+  const [replyMessage, setReplyMessage] = useState("");
+  const [replyError, setReplyError] = useState<string | null>(null);
 
   const [outputFolderError, setOutputFolderError] = useState<string | null>(null);
   // 監査ログフォルダを開くボタンのエラー表示用(docs/roadmap.md v0.6)。
@@ -509,6 +558,12 @@ export default function App() {
       setActiveSessionId(ids.length > 0 ? ids[ids.length - 1] : null);
     }
   }, [sessions, activeSessionId]);
+
+  // タブを切り替えたら返信欄の下書きを引き継がない(誤送信防止)。
+  useEffect(() => {
+    setReplyMessage("");
+    setReplyError(null);
+  }, [activeSessionId]);
 
   const anyRunning = Object.values(sessions).some(
     (s) => sessionSummary(s.events.map((e) => e.event)).status === "running",
@@ -807,6 +862,36 @@ export default function App() {
       });
     } catch (e) {
       setRunError(String(e));
+    }
+  }
+
+  /** ask_user への回答(v1.0 経路A)。respondPermission と同じ respondedRequestIds を共有する
+   * (request_id の名前空間が異なるため衝突しない)。 */
+  async function respondUserInput(requestId: string, answer: string | null) {
+    if (!activeSessionId) return;
+    try {
+      await invoke("respond_user_input", { requestId, answer });
+      setSessions((prev) => {
+        const s = prev[activeSessionId];
+        if (!s) return prev;
+        const responded = new Set(s.respondedRequestIds).add(requestId);
+        return { ...prev, [activeSessionId]: { ...s, respondedRequestIds: responded } };
+      });
+    } catch (e) {
+      setRunError(String(e));
+    }
+  }
+
+  /** タスク完了後の追い返信(v1.0 経路B)。同じ session_id を resume して続きを実行する。 */
+  async function handleReply() {
+    if (!activeSessionId || !replyMessage.trim()) return;
+    setReplyError(null);
+    const agentId = activeSession?.agentId ?? "";
+    try {
+      await invoke("reply_task", { sessionId: activeSessionId, agentId, message: replyMessage });
+      setReplyMessage("");
+    } catch (e) {
+      setReplyError(String(e));
     }
   }
 
@@ -1301,6 +1386,7 @@ export default function App() {
                   elapsedMs={elapsedMsFor(tree.main, activeSession.rowStartedAt, nowTick)}
                   isSub={false}
                   onRespond={respondPermission}
+                  onRespondUserInput={respondUserInput}
                 />
                 {tree.subagents.map((sub) => (
                   <div className="sub-indent" key={sub.key}>
@@ -1309,6 +1395,7 @@ export default function App() {
                       elapsedMs={elapsedMsFor(sub, activeSession.rowStartedAt, nowTick)}
                       isSub
                       onRespond={respondPermission}
+                      onRespondUserInput={respondUserInput}
                     />
                   </div>
                 ))}
@@ -1318,6 +1405,24 @@ export default function App() {
               <div className="task-summary">
                 <h3>結果</h3>
                 <p>{tree.summary}</p>
+              </div>
+            )}
+            {(tree.taskStatus === "completed" || tree.taskStatus === "failed") && (
+              <div className="task-summary">
+                <h3>続けて依頼する(このセッションに返信)</h3>
+                <textarea
+                  className="prompt-input"
+                  rows={2}
+                  value={replyMessage}
+                  onChange={(e) => setReplyMessage(e.target.value)}
+                  placeholder="続けて依頼する内容を入力してください"
+                />
+                <div className="run-controls">
+                  <button type="button" onClick={handleReply} disabled={!replyMessage.trim()}>
+                    返信して続行
+                  </button>
+                </div>
+                {replyError && <p className="error">⚠ {replyError}</p>}
               </div>
             )}
           </>

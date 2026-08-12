@@ -114,6 +114,7 @@ export type AppEvent =
   | { kind: "taskCompleted"; sessionId: string; summary: string; outputFiles: string[] }
   | { kind: "taskFailed"; sessionId: string; error: string }
   | { kind: "taskCancelled"; sessionId: string }
-  | { kind: "allowRuleAdded"; sessionId: string; agentId: string | null; pattern: string };
+  | { kind: "allowRuleAdded"; sessionId: string; agentId: string | null; pattern: string }
+  | { kind: "userInputRequested"; sessionId: string; requestId: string; question: string; choices: string[]; allowFreeform: boolean };
 
 export const EVENT_CHANNEL = "agent://event";
