@@ -154,6 +154,37 @@ session.background_tasks_changed
 - `PermissionRequested` にはエージェント相関 ID が無い → ツリー表示は「直近に活動した行」への
   ヒューリスティック帰属(v0.1 は逐次実行なので成立。並行化時に要見直し — tree.ts に ponytail 注記)
 
+### ユーザー入力(エージェントからの質問)(2026-08-13 ソース直読み)
+
+- `UserInputHandler` トレイト:
+  `handle(&self, session_id, question: String, choices: Option<Vec<String>>, allow_freeform: Option<bool>) -> Option<UserInputResponse { answer, was_freeform }>`
+  `SessionConfig::with_user_input_handler(Arc<dyn UserInputHandler>)` で登録
+- **登録しないと `ask_user` ツール自体が無効化される**(wire に `requestUserInput: false`)。
+  つまりハンドラ未登録 = エージェントは質問できない
+- 応答はハンドラの戻り値で完結(CLI → SDK の JSON-RPC に SDK が自動応答)。`None` = 「回答なし」
+- イベント `user_input.requested` の payload: `question` / `choices?` / `allow_freeform?` / `request_id` / `tool_call_id?`
+
+### セッション再開(完了後の追い返信)(2026-08-13 ソース直読み)
+
+- `Client::resume_session(ResumeSessionConfig::new(session_id))`。disconnect 済みセッションを
+  再開して send_and_wait できる(SDK の e2e テストで実証されている手順)
+- **重要: resume は「前回設定への差分適用」ではない。** `ResumeSessionConfig` は session_id 以外
+  全フィールド None で始まり、`custom_agents` / `permission_handler` / `user_input_handler` /
+  `working_directory` / `agent` / `model` 等**すべて再指定が必要**(未指定は無効化)
+- `with_continue_pending_work(true)` を付けるのが SDK テストの流儀
+
+### 組み込みツールの語彙(2026-08-13 公式ドキュメント確認)
+
+- `.agent.md` の `tools` に書ける**公式エイリアス**(docs.github.com custom-agents-configuration):
+  `execute`(=shell/Bash/powershell)/ `read` / `edit`(=Write 等)/ `search`(=Grep/Glob)/
+  `agent`(=委任)/ `web`(=WebSearch/WebFetch)/ `todo`。
+  特殊値: `["*"]` 全許可(省略と同義)/ `[]` 全禁止 / MCP は `server/tool` か `server/*`。
+  **認識できない名前はエラーにならず無視される**
+- ランタイムに「有効なツール一覧」を返す API・イベントは無い(`session.tools_updated` の payload は
+  `model` のみ)。UI の選択肢は上記の公式表をハードコードするのが正(出典 URL をコメントに残す)
+- SDK の `available_tools`/`excluded_tools`(`builtin:<name>` 空間)は上記と**別語彙**。
+  全列挙定数は SDK に無い
+
 ### 中断
 
 - **タスク中断の正道は `Session::abort()`**(`session.abort` RPC)。進行中の `send_and_wait` は

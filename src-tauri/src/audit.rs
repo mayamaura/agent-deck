@@ -68,7 +68,8 @@ impl AuditWriter {
 #[serde(rename_all = "camelCase")]
 pub struct PermissionAudit {
     pub timestamp: String,
-    /// autoApproved / autoDenied / userApproved / userDenied / unattendedDenied
+    /// autoApproved / autoDenied / userApproved / userApprovedAlways / userDenied / unattendedDenied
+    /// (userApprovedAlways は「常に許可」経路。docs/architecture.md §7.1 拡張)
     pub decision: String,
     pub tool_name: String,
     pub detail: Option<String>,

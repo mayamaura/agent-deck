@@ -579,6 +579,11 @@ fn spawn_task(
     tauri::async_runtime::spawn(async move {
         let sink_handle = app_handle.clone();
         let run_id_for_sink = run_id_for_task.clone();
+        // 「常に許可」で agents.json へ書き戻す対象エージェント(docs/architecture.md §7.1 拡張)。
+        // AllowRuleAdded イベント自体の agent_id は使わない(PermissionHandler はサブエージェント
+        // 相関を持てないため常に None。どのエージェントに書くかは、ここで spawn_task が
+        // 既に知っている agent_id を使う。copilot.rs のコメント参照)。
+        let agent_id_for_sink = agent_id.clone();
         let sink = move |ev: events::AppEvent| {
             // TaskStarted でセッション ID が判明した時点で RunningTask に反映する
             // (cancel_task が session_id を突き合わせられるようにするため)。
@@ -586,6 +591,32 @@ fn spawn_task(
                 if let Some(state) = sink_handle.try_state::<AppState>() {
                     if let Some(running) = state.running.lock().unwrap().get_mut(&run_id_for_sink) {
                         running.session_id = session_id.clone();
+                    }
+                }
+            }
+            // 「常に許可」の永続化(docs/architecture.md §7.1 拡張)。PermissionHandler 側では
+            // SDK 型・設定ファイルへの書き込みを行わない設計のため、ここ(sink)で agents.json に
+            // 書き戻す。失敗しても実行中のタスク自体は継続する(eprintln のみ)。
+            if let events::AppEvent::AllowRuleAdded { pattern, .. } = &ev {
+                if let Some(state) = sink_handle.try_state::<AppState>() {
+                    if let Ok(data_dir) = state.data_dir() {
+                        match config::load_agents_config(data_dir) {
+                            Ok(mut cfg) => {
+                                let entry = cfg
+                                    .agents
+                                    .entry(agent_id_for_sink.clone())
+                                    .or_insert_with(AgentSettings::default);
+                                if !entry.allowed_tools.contains(pattern) {
+                                    entry.allowed_tools.push(pattern.clone());
+                                    if let Err(e) = config::save_agents_config(data_dir, &cfg) {
+                                        eprintln!("常に許可ルールの保存に失敗しました: {e}");
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("agents.json の読み込みに失敗しました(常に許可ルールを保存できません): {e}")
+                            }
+                        }
                     }
                 }
             }
@@ -772,9 +803,18 @@ fn cancel_task(state: State<AppState>, session_id: String) -> Result<(), String>
     }
 }
 
+/// decision は "approveOnce" / "approveAlways" / "deny"(承認ダイアログの3択。
+/// docs/architecture.md §7.1 拡張)。SDK の型をフロントに流さないのと同様、フロントには
+/// 文字列だけ持たせ、Rust 側で PermissionReply に変換する。
 #[tauri::command]
-fn respond_permission(state: State<AppState>, request_id: String, decision: bool) -> Result<(), String> {
-    state.bridge.respond(&request_id, decision)
+fn respond_permission(state: State<AppState>, request_id: String, decision: String) -> Result<(), String> {
+    let reply = match decision.as_str() {
+        "approveOnce" => copilot::PermissionReply::ApproveOnce,
+        "approveAlways" => copilot::PermissionReply::ApproveAlways,
+        "deny" => copilot::PermissionReply::Deny,
+        other => return Err(format!("不明な決定です: {other}")),
+    };
+    state.bridge.respond(&request_id, reply)
 }
 
 fn main() {

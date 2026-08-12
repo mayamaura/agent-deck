@@ -149,7 +149,9 @@ async fn run_task_and_collect(
         match &ev {
             AppEvent::PermissionRequested { request_id, permission_kind, detail, .. } => {
                 outcome.permission_requests.push((permission_kind.clone(), detail.clone()));
-                if let Err(e) = bridge.respond(request_id, auto_approve) {
+                let reply =
+                    if auto_approve { copilot::PermissionReply::ApproveOnce } else { copilot::PermissionReply::Deny };
+                if let Err(e) = bridge.respond(request_id, reply) {
                     eprintln!("bridge.respond に失敗しました: {e}");
                 }
             }

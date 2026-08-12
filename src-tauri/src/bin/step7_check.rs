@@ -30,7 +30,10 @@ mod events;
 mod config;
 #[path = "../permissions.rs"]
 mod permissions;
+// このバイナリは承認ダイアログの3択(PermissionReply)のうち Deny しか使わないため
+// allow(dead_code)(docs/architecture.md §7.1 拡張。config/audit と同じ理由)。
 #[path = "../copilot.rs"]
+#[allow(dead_code)]
 mod copilot;
 // copilot.rs が use crate::audit(監査ログ。docs/roadmap.md v0.6)を要求するため共有する。
 // このバイナリでは監査ログの中身までは検証しないため allow(dead_code)。
@@ -161,7 +164,7 @@ async fn run_task_and_collect(
         match &ev {
             AppEvent::PermissionRequested { request_id, permission_kind, detail, .. } => {
                 outcome.permission_requests.push((permission_kind.clone(), detail.clone()));
-                if let Err(e) = bridge.respond(request_id, false) {
+                if let Err(e) = bridge.respond(request_id, copilot::PermissionReply::Deny) {
                     eprintln!("bridge.respond に失敗しました: {e}");
                 }
             }

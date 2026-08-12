@@ -138,6 +138,8 @@ function summarize(ev: AppEvent): string {
       return `タスク失敗: ${ev.error}`;
     case "taskCancelled":
       return "タスク中断";
+    case "allowRuleAdded":
+      return `常に許可を登録しました: ${ev.pattern}`;
   }
 }
 
@@ -207,6 +209,10 @@ function elapsedMsFor(row: AgentRow, rowStartedAt: Record<string, number>, nowTi
   return start != null ? nowTick - start : null;
 }
 
+/** 承認ダイアログの3択(docs/architecture.md §7.1 拡張)。respond_permission コマンドの
+ * decision 引数と同じ文字列(Rust 側で copilot::PermissionReply に変換される)。 */
+type PermissionDecision = "approveOnce" | "approveAlways" | "deny";
+
 function AgentRowView({
   row,
   elapsedMs,
@@ -216,7 +222,7 @@ function AgentRowView({
   row: AgentRow;
   elapsedMs: number | null;
   isSub: boolean;
-  onRespond: (requestId: string, decision: boolean) => void;
+  onRespond: (requestId: string, decision: PermissionDecision) => void;
 }) {
   return (
     <div className={isSub ? "agent-row sub" : "agent-row"}>
@@ -246,12 +252,18 @@ function AgentRowView({
       {row.pendingPermissions.map((p) => (
         <div key={p.requestId} className="permission-dialog">
           <span>⚠ 承認が必要: {p.detail}</span>
-          <button type="button" onClick={() => onRespond(p.requestId, true)}>
-            承認
+          <button type="button" onClick={() => onRespond(p.requestId, "approveOnce")}>
+            今回のみ承認
           </button>
-          <button type="button" onClick={() => onRespond(p.requestId, false)}>
+          {p.suggestedPattern && (
+            <button type="button" onClick={() => onRespond(p.requestId, "approveAlways")}>
+              常に許可(このエージェント)
+            </button>
+          )}
+          <button type="button" onClick={() => onRespond(p.requestId, "deny")}>
             拒否
           </button>
+          {p.suggestedPattern && <span className="muted">以後 {p.suggestedPattern} を自動承認します</span>}
         </div>
       ))}
     </div>
@@ -424,6 +436,10 @@ export default function App() {
     listen<AppEvent>(EVENT_CHANNEL, ({ payload: ev }) => {
       const logged: LoggedEvent = { time: new Date().toLocaleTimeString(), event: ev };
       const sid = ev.sessionId;
+      // allowRuleAdded 用: このセッションが属するエージェント id(setSessions のアップデータ内
+      // でしか prev[sid] を安全に読めない ── このエフェクトは deps [] で購読しているため、
+      // クロージャ内の `sessions` はマウント時点のまま古くなる)。
+      let allowRuleAgentId: string | null = null;
 
       setSessions((prev) => {
         const base: SessionState = prev[sid] ?? {
@@ -432,6 +448,7 @@ export default function App() {
           rowStartedAt: {},
           respondedRequestIds: new Set(),
         };
+        if (ev.kind === "allowRuleAdded") allowRuleAgentId = base.agentId || null;
         const next: SessionState = { ...base, events: [...base.events, logged] };
         if (ev.kind === "taskStarted") {
           next.agentId = ev.agentId;
@@ -441,6 +458,29 @@ export default function App() {
         }
         return { ...prev, [sid]: next };
       });
+
+      if (ev.kind === "allowRuleAdded" && allowRuleAgentId) {
+        // 設定フォームの表示を実態(agents.json への永続化)とずれさせない。formDirty=true の
+        // 間はフォーム自体を触らないが、それは configs→form の同期 useEffect が既にガードしている
+        // (下の useEffect の deps に formDirty がある)ため、ここでは configs だけ更新すればよい。
+        const targetAgentId = allowRuleAgentId;
+        const pattern = ev.pattern;
+        setConfigs((prev) => {
+          const current = prev[targetAgentId] ?? null;
+          const allowedTools = current?.allowedTools ?? [];
+          if (allowedTools.includes(pattern)) return prev;
+          const updated: AgentSettings = current
+            ? { ...current, allowedTools: [...allowedTools, pattern] }
+            : {
+                inputDir: null,
+                outputDir: null,
+                allowedTools: [pattern],
+                deniedTools: [],
+                autoApproveWriteInOutputDir: true,
+              };
+          return { ...prev, [targetAgentId]: updated };
+        });
+      }
 
       if (ev.kind === "taskStarted") {
         setActiveSessionId(sid);
@@ -755,7 +795,7 @@ export default function App() {
   }
 
   /** 選択中タブ(activeSessionId)の respondedRequestIds に requestId を積む。 */
-  async function respondPermission(requestId: string, decision: boolean) {
+  async function respondPermission(requestId: string, decision: PermissionDecision) {
     if (!activeSessionId) return;
     try {
       await invoke("respond_permission", { requestId, decision });

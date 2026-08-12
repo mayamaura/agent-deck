@@ -29,7 +29,10 @@ mod events;
 mod config;
 #[path = "../permissions.rs"]
 mod permissions;
+// このバイナリは承認ダイアログの3択(PermissionReply)のうち ApproveOnce しか使わないため
+// allow(dead_code)(docs/architecture.md §7.1 拡張。config/audit と同じ理由)。
 #[path = "../copilot.rs"]
+#[allow(dead_code)]
 mod copilot;
 // cleanup_old_logs はこのバイナリでは検証しない(main.rs の起動時処理でのみ呼ばれる)ため
 // allow(dead_code)。
@@ -132,7 +135,7 @@ async fn run_round_a(cli_path: &PathBuf, ws: &PathBuf, out: &PathBuf, logs_dir: 
             // (docs/architecture.md §7.1: 自動承認の対象は write のみ。step6_check.rs の
             // ラウンドAも同様に許容している)。常に承認して応答しないと send_and_wait が
             // タイムアウトまでハングするため、種別を問わず承認する。
-            if let Err(e) = bridge.respond(request_id, true) {
+            if let Err(e) = bridge.respond(request_id, copilot::PermissionReply::ApproveOnce) {
                 eprintln!("bridge.respond に失敗しました: {e}");
             }
         }

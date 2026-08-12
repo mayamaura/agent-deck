@@ -80,10 +80,21 @@ pub struct TaskSpec {
     pub logs_dir: PathBuf,
 }
 
+/// respond_permission コマンドの応答種別(承認ダイアログの3択。docs/architecture.md §7.1 拡張)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionReply {
+    /// 今回のみ承認。
+    ApproveOnce,
+    /// 常に許可(このエージェント)。suggest_allow_pattern が提案したパターンを
+    /// agents.json へ永続化する(実際の書き込みは main.rs の sink 側)。
+    ApproveAlways,
+    Deny,
+}
+
 /// UI からの承認応答を届けるブリッジ。main.rs の respond_permission コマンドと共有する
 /// (AppState が保持し、start_task で TaskSpec に渡す)。
 pub struct PermissionBridge {
-    pending: std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
+    pending: std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<PermissionReply>>>,
 }
 
 impl PermissionBridge {
@@ -91,9 +102,9 @@ impl PermissionBridge {
         Arc::new(Self { pending: std::sync::Mutex::new(HashMap::new()) })
     }
 
-    /// UI から届いた承認/拒否を該当タスクへ届ける。存在しない request_id はエラーにする
+    /// UI から届いた応答を該当タスクへ届ける。存在しない request_id はエラーにする
     /// (docs/development.md §3: エラーを握りつぶさない)。
-    pub fn respond(&self, request_id: &str, approve: bool) -> Result<(), String> {
+    pub fn respond(&self, request_id: &str, reply: PermissionReply) -> Result<(), String> {
         let tx = self
             .pending
             .lock()
@@ -102,12 +113,12 @@ impl PermissionBridge {
             .ok_or_else(|| format!("不明な承認要求です(既に応答済みか、対象タスクが終了しています): {request_id}"))?;
         // 受信側(run_task の PermissionHandler)がタスク終了で既に消えていても、
         // 送信失敗は握りつぶしてよい(完了直後の応答はタイミング差であり利用者側のエラーではない)。
-        let _ = tx.send(approve);
+        let _ = tx.send(reply);
         Ok(())
     }
 
     /// Ask になった要求ごとに応答待ちの受信側を登録する。
-    fn register(&self, request_id: String) -> tokio::sync::oneshot::Receiver<bool> {
+    fn register(&self, request_id: String) -> tokio::sync::oneshot::Receiver<PermissionReply> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.pending.lock().unwrap().insert(request_id, tx);
         rx
@@ -184,6 +195,29 @@ fn build_permission_input(data: &PermissionRequestData) -> permissions::Permissi
     permissions::PermissionInput { tool_name, detail, write_path, read_path }
 }
 
+/// 「常に許可」ボタンで agents.json に追加提案するパターン(docs/architecture.md §7.1 拡張)。
+/// フロントには判断させず、ここで決めた文字列をそのまま PermissionRequested.suggested_pattern
+/// として渡す(ユーザーが承認した際も同じ文字列を使う。copilot.rs 内で完結させるため純関数にする)。
+///
+/// - write: 常に None(全書き込みの無条件許可は出力フォルダ自動承認の設計を骨抜きにするため
+///   提案しない。write だけは2択のまま)
+/// - shell: detail(フルコマンド文字列)の先頭トークンで `shell(TOKEN)`。detail が無ければ
+///   ワイルドカードなしの `shell`(bare)にする
+/// - それ以外(read/url/mcp/custom-tool 等): ツール種別名そのまま
+fn suggest_allow_pattern(input: &permissions::PermissionInput) -> Option<String> {
+    if input.tool_name == "write" {
+        return None;
+    }
+    if input.tool_name == "shell" {
+        let first_token = input.detail.as_deref().and_then(|d| d.split_whitespace().next());
+        return Some(match first_token {
+            Some(token) => format!("shell({token})"),
+            None => "shell".to_string(),
+        });
+    }
+    Some(input.tool_name.clone())
+}
+
 fn permission_kind_str(kind: Option<PermissionRequestKind>) -> String {
     match kind {
         Some(PermissionRequestKind::Shell) => "shell",
@@ -209,7 +243,10 @@ fn permission_kind_str(kind: Option<PermissionRequestKind>) -> String {
 /// いない)。新規クレート追加は tauri-plugin-dialog 以外禁止のため、マクロが生成するのと
 /// 同じ `Pin<Box<dyn Future>>` を返す形を手で書く。
 struct UiPermissionHandler {
-    rules: permissions::PermissionRules,
+    /// Mutex 化の理由: 「常に許可」で承認されたパターンを、このタスクの実行中に
+    /// 追記する必要があるため(docs/architecture.md §7.1 拡張。以後の同種要求は
+    /// この場で足したパターンにより decide() が自動承認する)。
+    rules: std::sync::Mutex<permissions::PermissionRules>,
     bridge: Arc<PermissionBridge>,
     sink: Arc<dyn Fn(AppEvent) + Send + Sync>,
     /// ユーザーが拒否した(または無人実行で自動拒否した)際に run_task の select ループへ
@@ -262,8 +299,12 @@ impl PermissionHandler for UiPermissionHandler {
             );
 
             let input = build_permission_input(&data);
+            let decision = {
+                let rules = self.rules.lock().unwrap();
+                permissions::decide(&rules, &input)
+            };
 
-            match permissions::decide(&self.rules, &input) {
+            match decision {
                 permissions::Decision::Deny => {
                     self.audit.record_permission(&session_id_str, &permission_audit(&input, "autoDenied"));
                     PermissionResult::reject("agents.json の deniedTools により拒否".to_string())
@@ -292,11 +333,13 @@ impl PermissionHandler for UiPermissionHandler {
                         return PermissionResult::reject(reason);
                     }
                     let request_id_str = request_id.to_string();
+                    let suggested_pattern = suggest_allow_pattern(&input);
                     let permission_event = AppEvent::PermissionRequested {
                         session_id: session_id_str.clone(),
                         request_id: request_id_str.clone(),
                         permission_kind: input.tool_name.clone(),
                         detail,
+                        suggested_pattern: suggested_pattern.clone(),
                     };
                     // 監査ログは「全 AppEvent」が方針(docs/roadmap.md v0.6)。この後の
                     // record_permission(userApproved/userDenied)は最終判定のみを記す別記録。
@@ -304,7 +347,7 @@ impl PermissionHandler for UiPermissionHandler {
                     (self.sink)(permission_event);
                     let rx = self.bridge.register(request_id_str);
                     match rx.await {
-                        Ok(true) => {
+                        Ok(PermissionReply::ApproveOnce) => {
                             if let Some(path) = &input.write_path {
                                 self.output_files.lock().unwrap().push(path.clone());
                             }
@@ -314,7 +357,42 @@ impl PermissionHandler for UiPermissionHandler {
                             self.audit.record_permission(&session_id_str, &permission_audit(&input, "userApproved"));
                             PermissionResult::approve_once()
                         }
-                        Ok(false) => {
+                        Ok(PermissionReply::ApproveAlways) => {
+                            if let Some(path) = &input.write_path {
+                                self.output_files.lock().unwrap().push(path.clone());
+                            }
+                            if let Some(path) = &input.read_path {
+                                self.input_files.lock().unwrap().push(path.clone());
+                            }
+                            // suggested_pattern は write では None(呼び出し元 UI も write には
+                            // ボタンを出さない)。防御的に None なら何も永続化しない。
+                            if let Some(pattern) = &suggested_pattern {
+                                let is_new = {
+                                    let mut rules = self.rules.lock().unwrap();
+                                    if rules.allowed_tools.iter().any(|p| p == pattern) {
+                                        false
+                                    } else {
+                                        rules.allowed_tools.push(pattern.clone());
+                                        true
+                                    }
+                                };
+                                if is_new {
+                                    // 実際の agents.json への永続化は main.rs の sink 側が担当する
+                                    // (docs/architecture.md §7.1 拡張: SDK 型・設定ファイルへの
+                                    // 書き込みを PermissionHandler に持ち込まないため)。
+                                    let allow_event = AppEvent::AllowRuleAdded {
+                                        session_id: session_id_str.clone(),
+                                        agent_id: None,
+                                        pattern: pattern.clone(),
+                                    };
+                                    self.audit.record_event(&session_id_str, &allow_event);
+                                    (self.sink)(allow_event);
+                                }
+                            }
+                            self.audit.record_permission(&session_id_str, &permission_audit(&input, "userApprovedAlways"));
+                            PermissionResult::approve_once()
+                        }
+                        Ok(PermissionReply::Deny) => {
                             // タスク全体を止める(拒否は個々のツール呼び出しだけでなく実行全体の中断)。
                             self.audit.record_permission(&session_id_str, &permission_audit(&input, "userDenied"));
                             let _ = self.abort_tx.send("権限が拒否されたため実行を中断しました".to_string());
@@ -807,7 +885,7 @@ pub async fn run_task(
     // 遅延生成されるため、この時点(セッション作成前)で作ってよい。
     let audit = Arc::new(audit::AuditWriter::new(&spec.logs_dir));
     let permission_handler = Arc::new(UiPermissionHandler {
-        rules: spec.rules.clone(),
+        rules: std::sync::Mutex::new(spec.rules.clone()),
         bridge: bridge.clone(),
         sink: Arc::clone(&sink),
         abort_tx: deny_abort_tx,
@@ -1262,5 +1340,38 @@ mod tests {
     fn with_hint_leaves_unmatched_error_unchanged() {
         let original = "何か予期しないエラーが発生しました";
         assert_eq!(with_hint(original), original);
+    }
+
+    fn pi(tool_name: &str, detail: Option<&str>) -> permissions::PermissionInput {
+        permissions::PermissionInput {
+            tool_name: tool_name.to_string(),
+            detail: detail.map(str::to_string),
+            write_path: None,
+            read_path: None,
+        }
+    }
+
+    #[test]
+    fn suggest_allow_pattern_shell_uses_first_token_of_detail() {
+        let input = pi("shell", Some("python analyze.py"));
+        assert_eq!(suggest_allow_pattern(&input), Some("shell(python)".to_string()));
+    }
+
+    #[test]
+    fn suggest_allow_pattern_shell_without_detail_is_bare_shell() {
+        let input = pi("shell", None);
+        assert_eq!(suggest_allow_pattern(&input), Some("shell".to_string()));
+    }
+
+    #[test]
+    fn suggest_allow_pattern_url_uses_tool_name() {
+        let input = pi("url", Some("https://example.com"));
+        assert_eq!(suggest_allow_pattern(&input), Some("url".to_string()));
+    }
+
+    #[test]
+    fn suggest_allow_pattern_write_is_none() {
+        let input = pi("write", None);
+        assert_eq!(suggest_allow_pattern(&input), None);
     }
 }

@@ -62,6 +62,9 @@ pub enum AppEvent {
         // タグの "kind" と衝突するため permission_kind とする(write / shell など)
         permission_kind: String,
         detail: String,
+        // 「常に許可」ボタンに使うパターン提案(copilot::suggest_allow_pattern)。
+        // None ならフロントはボタンを出さない(write は無条件書き込み許可の骨抜きを防ぐため提案しない)。
+        suggested_pattern: Option<String>,
     },
     UsageUpdated {
         session_id: String,
@@ -80,5 +83,16 @@ pub enum AppEvent {
     /// ユーザーによる中断(TaskFailed とは区別する)。
     TaskCancelled {
         session_id: String,
+    },
+    /// ユーザーが「常に許可」を選んだ際、agents.json へ永続化すべきパターンをフロントへ知らせる
+    /// (docs/architecture.md §7.1 の拡張)。実際の永続化は main.rs の sink 側が担当する
+    /// (SDK 型・設定ファイルへの書き込みを PermissionHandler に持ち込まないため)。
+    /// agent_id はサブエージェント由来の場合に備えた情報用の Option(現状 SDK の権限要求には
+    /// エージェント相関 ID が無いため常に None。どのエージェントの agents.json を書き換えるかは
+    /// main.rs の spawn_task が既に知っている agent_id を使う)。
+    AllowRuleAdded {
+        session_id: String,
+        agent_id: Option<String>,
+        pattern: String,
     },
 }

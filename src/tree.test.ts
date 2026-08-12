@@ -77,14 +77,21 @@ describe("buildTree", () => {
       { kind: "taskStarted", sessionId: "s1", agentId: "coordinator", startedAt: "2026-08-12T00:00:00Z" },
       { kind: "subagentStarted", sessionId: "s1", agentId: "sub-1", toolCallId: "call-1", displayName: "writer" },
       { kind: "toolStarted", sessionId: "s1", agentId: "sub-1", toolCallId: "t-1", toolName: "write" },
-      { kind: "permissionRequested", sessionId: "s1", requestId: "req-1", permissionKind: "write", detail: "out.md" },
+      {
+        kind: "permissionRequested",
+        sessionId: "s1",
+        requestId: "req-1",
+        permissionKind: "write",
+        detail: "out.md",
+        suggestedPattern: null,
+      },
     ];
 
     const pending = buildTree(events, noResponses);
     // 直近の活動はサブ(sub-1)への toolStarted なので、サブ行に積まれる。
     expect(pending.main?.pendingPermissions).toEqual([]);
     expect(pending.subagents[0].pendingPermissions).toEqual([
-      { requestId: "req-1", permissionKind: "write", detail: "out.md" },
+      { requestId: "req-1", permissionKind: "write", detail: "out.md", suggestedPattern: null },
     ]);
 
     const responded = buildTree(events, new Set(["req-1"]));
@@ -95,7 +102,14 @@ describe("buildTree", () => {
     const events: AppEvent[] = [
       { kind: "taskStarted", sessionId: "s1", agentId: "writer", startedAt: "2026-08-12T00:00:00Z" },
       { kind: "toolStarted", sessionId: "s1", agentId: null, toolCallId: "t-1", toolName: "write" },
-      { kind: "permissionRequested", sessionId: "s1", requestId: "req-1", permissionKind: "write", detail: "out.md" },
+      {
+        kind: "permissionRequested",
+        sessionId: "s1",
+        requestId: "req-1",
+        permissionKind: "write",
+        detail: "out.md",
+        suggestedPattern: "shell(python)",
+      },
     ];
     const tree = buildTree(events, noResponses);
     expect(tree.main?.pendingPermissions).toHaveLength(1);

@@ -109,10 +109,11 @@ export type AppEvent =
   | { kind: "subagentFailed"; sessionId: string; agentId: string; toolCallId: string; error: string }
   | { kind: "toolStarted"; sessionId: string; agentId: string | null; toolCallId: string; toolName: string }
   | { kind: "toolCompleted"; sessionId: string; agentId: string | null; toolCallId: string; toolName: string; success: boolean }
-  | { kind: "permissionRequested"; sessionId: string; requestId: string; permissionKind: string; detail: string }
+  | { kind: "permissionRequested"; sessionId: string; requestId: string; permissionKind: string; detail: string; suggestedPattern: string | null }
   | { kind: "usageUpdated"; sessionId: string; currentTokens: number; tokenLimit: number | null }
   | { kind: "taskCompleted"; sessionId: string; summary: string; outputFiles: string[] }
   | { kind: "taskFailed"; sessionId: string; error: string }
-  | { kind: "taskCancelled"; sessionId: string };
+  | { kind: "taskCancelled"; sessionId: string }
+  | { kind: "allowRuleAdded"; sessionId: string; agentId: string | null; pattern: string };
 
 export const EVENT_CHANNEL = "agent://event";

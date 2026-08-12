@@ -22,7 +22,14 @@ export interface AgentRow {
   durationMs: number | null;
   totalTokens: number | null;
   error: string | null;
-  pendingPermissions: { requestId: string; permissionKind: string; detail: string }[];
+  pendingPermissions: {
+    requestId: string;
+    permissionKind: string;
+    detail: string;
+    // 「常に許可」ボタンに使うパターン(copilot::suggest_allow_pattern が提案)。
+    // null なら App.tsx はボタンを出さない(write は無条件許可を提案しない設計)。
+    suggestedPattern: string | null;
+  }[];
 }
 
 export interface TreeState {
@@ -183,6 +190,7 @@ export function buildTree(events: AppEvent[], respondedRequestIds: ReadonlySet<s
             requestId: ev.requestId,
             permissionKind: ev.permissionKind,
             detail: ev.detail,
+            suggestedPattern: ev.suggestedPattern,
           });
         }
         break;
