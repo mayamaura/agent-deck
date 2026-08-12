@@ -273,6 +273,9 @@ export default function App() {
   // 選択中エージェントの入出力設定(docs/requirements.md §3.4)。
   const [configs, setConfigs] = useState<Record<string, AgentSettings | null>>({});
   const [form, setForm] = useState<ConfigFormState>(EMPTY_FORM);
+  // 未保存の編集があるか。true の間は configs の再取得(起動直後の非同期完了や
+  // reloadAgents 後)でフォームを上書きしない — フォルダ選択直後に値が消えるバグの根本対策。
+  const [formDirty, setFormDirty] = useState(false);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
 
   // エージェント定義エディタ(docs/roadmap.md v0.2)。
@@ -393,8 +396,9 @@ export default function App() {
   }, [agents]);
 
   // 選択中エージェントが変わったら、フォームへ現在の設定を読み込む。
+  // 編集中(formDirty)は configs の再取得が来ても上書きしない。
   useEffect(() => {
-    if (!selected) return;
+    if (!selected || formDirty) return;
     const c = configs[selected];
     setForm({
       inputDir: c?.inputDir ?? "",
@@ -404,7 +408,13 @@ export default function App() {
       autoApprove: c?.autoApproveWriteInOutputDir ?? true,
     });
     setSaveStatus(null);
-  }, [selected, configs]);
+  }, [selected, configs, formDirty]);
+
+  /** 設定フォームの編集。dirty を立てて再取得による巻き戻りを防ぐ。 */
+  function updateForm(patch: Partial<ConfigFormState>) {
+    setForm((f) => ({ ...f, ...patch }));
+    setFormDirty(true);
+  }
 
   // タスク実行イベントの購読(docs/architecture.md §4: 単一チャネルを kind で判別)。
   // sessionId ごとにセッションを束ねる(docs/roadmap.md v0.5: 並行実行)。taskStarted は
@@ -506,7 +516,7 @@ export default function App() {
   async function handlePickFolder(target: "inputDir" | "outputDir") {
     const dir = await open({ directory: true });
     if (typeof dir === "string") {
-      setForm((f) => ({ ...f, [target]: dir }));
+      updateForm({ [target]: dir });
     }
   }
 
@@ -522,6 +532,7 @@ export default function App() {
     try {
       await invoke("save_agent_config", { agentId: selected, settings });
       setConfigs((prev) => ({ ...prev, [selected]: settings }));
+      setFormDirty(false);
       setSaveStatus("✅ 保存しました");
     } catch (e) {
       setSaveStatus(`⚠ 保存に失敗しました: ${e}`);
@@ -809,7 +820,11 @@ export default function App() {
               <li key={`${a.id}:${a.scope}`}>
                 <button
                   className={selected === a.id ? "selected" : ""}
-                  onClick={() => setSelected(a.id)}
+                  onClick={() => {
+                    setSelected(a.id);
+                    // 別エージェントへ切り替えたら編集は破棄してそのエージェントの設定を読む
+                    setFormDirty(false);
+                  }}
                 >
                   <strong>
                     {a.name}
@@ -908,7 +923,7 @@ export default function App() {
                 <input
                   type="text"
                   value={form.inputDir}
-                  onChange={(e) => setForm((f) => ({ ...f, inputDir: e.target.value }))}
+                  onChange={(e) => updateForm({ inputDir: e.target.value })}
                 />
                 <button type="button" onClick={() => handlePickFolder("inputDir")}>
                   選択...
@@ -921,7 +936,7 @@ export default function App() {
                 <input
                   type="text"
                   value={form.outputDir}
-                  onChange={(e) => setForm((f) => ({ ...f, outputDir: e.target.value }))}
+                  onChange={(e) => updateForm({ outputDir: e.target.value })}
                 />
                 <button type="button" onClick={() => handlePickFolder("outputDir")}>
                   選択...
@@ -933,7 +948,7 @@ export default function App() {
               <input
                 type="text"
                 value={form.allowedTools}
-                onChange={(e) => setForm((f) => ({ ...f, allowedTools: e.target.value }))}
+                onChange={(e) => updateForm({ allowedTools: e.target.value })}
               />
             </label>
             <label>
@@ -941,14 +956,14 @@ export default function App() {
               <input
                 type="text"
                 value={form.deniedTools}
-                onChange={(e) => setForm((f) => ({ ...f, deniedTools: e.target.value }))}
+                onChange={(e) => updateForm({ deniedTools: e.target.value })}
               />
             </label>
             <label className="checkbox-row">
               <input
                 type="checkbox"
                 checked={form.autoApprove}
-                onChange={(e) => setForm((f) => ({ ...f, autoApprove: e.target.checked }))}
+                onChange={(e) => updateForm({ autoApprove: e.target.checked })}
               />
               出力フォルダへの書き込みを自動承認する
             </label>
