@@ -35,6 +35,25 @@ body {
   margin-bottom: 6px;
 }
 
+/* エージェント設定ウインドウ(AgentEditor.tsx)。3 ペインの layout は使わない。 */
+.editor-window {
+  background: #fff;
+  min-height: 100vh;
+  padding: 10px 12px;
+}
+
+.editor-window h2 {
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+
+/* 1 枚もののウインドウなので、最初のセクションの区切り線は不要。 */
+.editor-window > .definition-editor:first-of-type {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
 .agents { grid-area: agents; }
 .run { grid-area: run; }
 .detail { grid-area: detail; }

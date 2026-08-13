@@ -1,9 +1,9 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
-  AgentDefinitionDto,
   AgentSettings,
   AgentSummary,
   AppConfigDto,
@@ -19,15 +19,7 @@ import { EVENT_CHANNEL } from "./types";
 import { buildTree } from "./tree";
 import type { AgentRow, TreeState } from "./tree";
 import { sessionSummary } from "./sessions";
-import {
-  AGENT_TOOL_OPTIONS,
-  PERMISSION_TOOL_OPTIONS,
-  composeAgentTools,
-  composePermissionTools,
-  decomposeAgentTools,
-  decomposePermissionTools,
-} from "./toolCatalog";
-import type { AgentToolsFormState, PermissionToolsFormState } from "./toolCatalog";
+import { AGENTS_CHANGED } from "./AgentEditor";
 
 // 実行ビュー上部のダッシュボード帯・タブに残す「直近の完了/失敗/中断セッション」件数の上限
 // (docs/roadmap.md v0.5: 実行中+直近数件のセッション)。実行中セッションは件数に含めない。
@@ -38,42 +30,6 @@ const NO_RESPONSES = new Set<string>();
 // 3 ペイン構成の骨格(docs/requirements.md §3.1)。
 // 実行ビューはツリー表示(docs/requirements.md §3.3。このアプリの主目的)。
 // 生イベントの時系列ログ・トークン使用量・出力ファイルは詳細ペインへ移設。
-
-/** 設定フォームの編集用の状態。許可/拒否ツールはチェック集合+その他テキストで持ち、
- * 保存時に toolCatalog の compose 関数で配列へ結合する(スペルミス防止。ユーザー要望)。 */
-interface ConfigFormState {
-  inputDir: string;
-  outputDir: string;
-  allowedTools: PermissionToolsFormState;
-  deniedTools: PermissionToolsFormState;
-  autoApprove: boolean;
-}
-
-const EMPTY_FORM: ConfigFormState = {
-  inputDir: "",
-  outputDir: "",
-  allowedTools: { checked: [], other: "" },
-  deniedTools: { checked: [], other: "" },
-  autoApprove: true,
-};
-
-/** エージェント定義エディタ(個人スコープ)の編集用状態(docs/roadmap.md v0.2)。
- * tools はチェック集合+その他テキスト+全ツール/選択の切り替えで持つ(スペルミス防止。ユーザー要望)。 */
-interface DefinitionFormState {
-  name: string;
-  description: string;
-  model: string;
-  tools: AgentToolsFormState;
-  body: string;
-}
-
-const EMPTY_DEF_FORM: DefinitionFormState = {
-  name: "",
-  description: "",
-  model: "",
-  tools: { mode: "all", checked: [], other: "" },
-  body: "",
-};
 
 /** スケジュール追加・編集フォームの状態(docs/roadmap.md v0.4)。周期の種類ごとの
  * フィールド(weekday/day)は保存時に選択中の type のものだけを Recurrence へ詰める。 */
@@ -325,60 +281,27 @@ function AgentRowView({
   );
 }
 
-/** 入出力設定の許可/拒否ツール入力欄。基本形はチェックボックス(スペルミス防止。ユーザー要望)、
- * 括弧付きパターン等は「高度なパターン」欄に手入力する。 */
-function PermissionToolsField({
-  label,
-  description,
-  advancedHint,
-  state,
-  onChange,
-  showNotes,
-  afterOptions,
-}: {
-  label: string;
-  /** ラベル直下に出す説明(この欄が何をするものかの一文)。 */
-  description?: string;
-  advancedHint: string;
-  state: PermissionToolsFormState;
-  onChange: (next: PermissionToolsFormState) => void;
-  showNotes?: boolean;
-  /** チェックボックス群の直後(高度なパターン欄の前)に挿し込む追加行。
-   * 自動承認ツール側で「出力フォルダのみの書き込み自動承認」を write の直下に
-   * 連続配置するために使う(ユーザー要望: 書き込み系の設定を離さない)。 */
-  afterOptions?: ReactNode;
-}) {
-  return (
-    <div className="tools-field">
-      <span className="tools-field-label">{label}</span>
-      {description && <p className="muted hint">{description}</p>}
-      {PERMISSION_TOOL_OPTIONS.map((opt) => (
-        <div key={opt.value}>
-          <label className="checkbox-row">
-            <input
-              type="checkbox"
-              checked={state.checked.includes(opt.value)}
-              onChange={(e) =>
-                onChange({
-                  ...state,
-                  checked: e.target.checked
-                    ? [...state.checked, opt.value]
-                    : state.checked.filter((v) => v !== opt.value),
-                })
-              }
-            />
-            {opt.label}({opt.value})
-          </label>
-          {showNotes && opt.note && <p className="muted hint">{opt.note}</p>}
-        </div>
-      ))}
-      {afterOptions}
-      <label>
-        高度なパターン(手入力・カンマ区切り。例: {advancedHint})
-        <input type="text" value={state.other} onChange={(e) => onChange({ ...state, other: e.target.value })} />
-      </label>
-    </div>
-  );
+/**
+ * エージェント 1 件の設定ウインドウ(定義+入出力設定)を開く。頻度の低い設定を
+ * 一覧ペインから追い出すため別ウインドウにしている(ユーザー要望)。
+ * 既に開いていれば作り直さず前面に出す。
+ */
+async function openAgentEditor(agentId: string, onError: (message: string) => void) {
+  // ponytail: ラベルに使えない文字は _ に潰すだけ。別 ID が同じラベルに衝突すると
+  // 既存ウインドウが前面に出る。実運用の ID(英数字+ハイフン)では起きないので放置。
+  const label = `agent-editor-${agentId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+  const existing = await WebviewWindow.getByLabel(label);
+  if (existing) {
+    await existing.setFocus();
+    return;
+  }
+  const w = new WebviewWindow(label, {
+    url: `index.html?agent=${encodeURIComponent(agentId)}`,
+    title: `エージェント設定 — ${agentId}`,
+    width: 560,
+    height: 900,
+  });
+  w.once("tauri://error", (e) => onError(`設定ウインドウを開けませんでした: ${JSON.stringify(e.payload)}`));
 }
 
 export default function App() {
@@ -393,19 +316,9 @@ export default function App() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
 
-  // 選択中エージェントの入出力設定(docs/requirements.md §3.4)。
+  // 一覧の「未設定」バッジ用。編集自体は設定ウインドウ(AgentEditor.tsx)で行う。
   const [configs, setConfigs] = useState<Record<string, AgentSettings | null>>({});
-  const [form, setForm] = useState<ConfigFormState>(EMPTY_FORM);
-  // 未保存の編集があるか。true の間は configs の再取得(起動直後の非同期完了や
-  // reloadAgents 後)でフォームを上書きしない — フォルダ選択直後に値が消えるバグの根本対策。
-  const [formDirty, setFormDirty] = useState(false);
-  const [saveStatus, setSaveStatus] = useState<string | null>(null);
 
-  // エージェント定義エディタ(docs/roadmap.md v0.2)。
-  const [definition, setDefinition] = useState<AgentDefinitionDto | null>(null);
-  const [definitionError, setDefinitionError] = useState<string | null>(null);
-  const [defForm, setDefForm] = useState<DefinitionFormState>(EMPTY_DEF_FORM);
-  const [defSaveStatus, setDefSaveStatus] = useState<string | null>(null);
   const [newAgentId, setNewAgentId] = useState("");
   const [newAgentError, setNewAgentError] = useState<string | null>(null);
 
@@ -484,28 +397,14 @@ export default function App() {
       .catch((e) => console.error("更新確認に失敗しました:", e));
   }, []);
 
-  // 選択中エージェントの定義(個人=編集可、共有=読み取り専用。docs/roadmap.md v0.2)。
-  // 個人優先で解決された1件を返す(get_agent_definition の仕様)。
+  // 設定ウインドウでの保存・削除を一覧へ反映する(別 webview なので状態は共有されない)。
   useEffect(() => {
-    if (!selected) {
-      setDefinition(null);
-      return;
-    }
-    setDefinitionError(null);
-    invoke<AgentDefinitionDto>("get_agent_definition", { agentId: selected })
-      .then((d) => {
-        setDefinition(d);
-        setDefForm({
-          name: d.name,
-          description: d.description,
-          model: d.model ?? "",
-          tools: decomposeAgentTools(d.tools),
-          body: d.body,
-        });
-        setDefSaveStatus(null);
-      })
-      .catch((e) => setDefinitionError(String(e)));
-  }, [selected]);
+    let unlisten: (() => void) | undefined;
+    listen(AGENTS_CHANGED, () => reloadAgents()).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, []);
 
   // 一覧に出す「未設定」バッジのため、全エージェント分の設定をまとめて取得する
   // (get_agent_config は1件ずつしか取れないため並列 invoke。docs/requirements.md §3.2)。
@@ -521,27 +420,6 @@ export default function App() {
       .then((pairs) => setConfigs(Object.fromEntries(pairs)))
       .catch((e) => setError(String(e)));
   }, [agents]);
-
-  // 選択中エージェントが変わったら、フォームへ現在の設定を読み込む。
-  // 編集中(formDirty)は configs の再取得が来ても上書きしない。
-  useEffect(() => {
-    if (!selected || formDirty) return;
-    const c = configs[selected];
-    setForm({
-      inputDir: c?.inputDir ?? "",
-      outputDir: c?.outputDir ?? "",
-      allowedTools: decomposePermissionTools(c?.allowedTools ?? []),
-      deniedTools: decomposePermissionTools(c?.deniedTools ?? []),
-      autoApprove: c?.autoApproveWriteInOutputDir ?? true,
-    });
-    setSaveStatus(null);
-  }, [selected, configs, formDirty]);
-
-  /** 設定フォームの編集。dirty を立てて再取得による巻き戻りを防ぐ。 */
-  function updateForm(patch: Partial<ConfigFormState>) {
-    setForm((f) => ({ ...f, ...patch }));
-    setFormDirty(true);
-  }
 
   // タスク実行イベントの購読(docs/architecture.md §4: 単一チャネルを kind で判別)。
   // sessionId ごとにセッションを束ねる(docs/roadmap.md v0.5: 並行実行)。taskStarted は
@@ -575,9 +453,7 @@ export default function App() {
       });
 
       if (ev.kind === "allowRuleAdded" && allowRuleAgentId) {
-        // 設定フォームの表示を実態(agents.json への永続化)とずれさせない。formDirty=true の
-        // 間はフォーム自体を触らないが、それは configs→form の同期 useEffect が既にガードしている
-        // (下の useEffect の deps に formDirty がある)ため、ここでは configs だけ更新すればよい。
+        // 一覧の「未設定」バッジ判定を実態(agents.json への永続化)とずれさせない。
         const targetAgentId = allowRuleAgentId;
         const pattern = ev.pattern;
         setConfigs((prev) => {
@@ -674,32 +550,7 @@ export default function App() {
     }
   }
 
-  async function handlePickFolder(target: "inputDir" | "outputDir") {
-    const dir = await open({ directory: true });
-    if (typeof dir === "string") {
-      updateForm({ [target]: dir });
-    }
-  }
-
-  async function handleSaveConfig() {
-    if (!selected) return;
-    const settings: AgentSettings = {
-      inputDir: form.inputDir.trim() || null,
-      outputDir: form.outputDir.trim() || null,
-      allowedTools: composePermissionTools(form.allowedTools),
-      deniedTools: composePermissionTools(form.deniedTools),
-      autoApproveWriteInOutputDir: form.autoApprove,
-    };
-    try {
-      await invoke("save_agent_config", { agentId: selected, settings });
-      setConfigs((prev) => ({ ...prev, [selected]: settings }));
-      setFormDirty(false);
-      setSaveStatus("✅ 保存しました");
-    } catch (e) {
-      setSaveStatus(`⚠ 保存に失敗しました: ${e}`);
-    }
-  }
-
+  /** 新規作成はその場で空の定義を作り、あとは設定ウインドウに任せる。 */
   async function handleCreateAgent() {
     const id = newAgentId.trim();
     if (!id) return;
@@ -716,60 +567,9 @@ export default function App() {
       setNewAgentId("");
       await reloadAgents();
       setSelected(id);
+      await openAgentEditor(id, setNewAgentError);
     } catch (e) {
       setNewAgentError(String(e));
-    }
-  }
-
-  async function handleSaveDefinition() {
-    if (!selected) return;
-    setDefSaveStatus(null);
-    try {
-      await invoke("save_agent_definition", {
-        agentId: selected,
-        name: defForm.name,
-        description: defForm.description,
-        tools: composeAgentTools(defForm.tools),
-        model: defForm.model.trim() || null,
-        body: defForm.body,
-      });
-      setDefSaveStatus("✅ 保存しました");
-      await reloadAgents();
-    } catch (e) {
-      setDefSaveStatus(`⚠ 保存に失敗しました: ${e}`);
-    }
-  }
-
-  async function handleDeleteDefinition() {
-    if (!selected) return;
-    if (!window.confirm(`エージェント定義「${selected}」を削除しますか?`)) return;
-    try {
-      await invoke("delete_agent_definition", { agentId: selected });
-      setSelected(null);
-      await reloadAgents();
-    } catch (e) {
-      setDefinitionError(String(e));
-    }
-  }
-
-  async function handleDuplicateAgent() {
-    if (!selected) return;
-    setDefinitionError(null);
-    try {
-      await invoke("duplicate_agent", { agentId: selected });
-      await reloadAgents();
-      // 複製後は個人優先で解決され直すため、編集可能な個人版を再取得する。
-      const d = await invoke<AgentDefinitionDto>("get_agent_definition", { agentId: selected });
-      setDefinition(d);
-      setDefForm({
-        name: d.name,
-        description: d.description,
-        model: d.model ?? "",
-        tools: decomposeAgentTools(d.tools),
-        body: d.body,
-      });
-    } catch (e) {
-      setDefinitionError(String(e));
     }
   }
 
@@ -1011,11 +811,8 @@ export default function App() {
               <li key={`${a.id}:${a.scope}`}>
                 <button
                   className={selected === a.id ? "selected" : ""}
-                  onClick={() => {
-                    setSelected(a.id);
-                    // 別エージェントへ切り替えたら編集は破棄してそのエージェントの設定を読む
-                    setFormDirty(false);
-                  }}
+                  onClick={() => setSelected(a.id)}
+                  onDoubleClick={() => openAgentEditor(a.id, setError)}
                 >
                   <strong>
                     {a.name}
@@ -1032,191 +829,11 @@ export default function App() {
             );
           })}
         </ul>
-        {selected && definition && (
-          <div className="definition-editor">
-            <h3>定義({definition.scope === "shared" ? "共有・読み取り専用" : "個人"})</h3>
-            {definition.scope === "shared" ? (
-              <>
-                <p className="muted">name: {definition.name}</p>
-                <p className="muted">description: {definition.description}</p>
-                <p className="muted">model: {definition.model ?? "(未指定)"}</p>
-                <p className="muted">tools: {definition.tools ? definition.tools.join(", ") : "(全ツール)"}</p>
-                <pre className="definition-body">{definition.body}</pre>
-                <div className="run-controls">
-                  <button type="button" onClick={handleDuplicateAgent}>
-                    複製して編集
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                <label>
-                  名前
-                  <input
-                    type="text"
-                    value={defForm.name}
-                    onChange={(e) => setDefForm((f) => ({ ...f, name: e.target.value }))}
-                  />
-                </label>
-                <label>
-                  説明
-                  <input
-                    type="text"
-                    value={defForm.description}
-                    onChange={(e) => setDefForm((f) => ({ ...f, description: e.target.value }))}
-                  />
-                </label>
-                <label>
-                  モデル(空欄でアプリ既定)
-                  <input
-                    type="text"
-                    value={defForm.model}
-                    onChange={(e) => setDefForm((f) => ({ ...f, model: e.target.value }))}
-                  />
-                </label>
-                <div className="tools-field">
-                  <span className="tools-field-label">ツール</span>
-                  <label className="radio-row">
-                    <input
-                      type="radio"
-                      name="def-tools-mode"
-                      checked={defForm.tools.mode === "all"}
-                      onChange={() => setDefForm((f) => ({ ...f, tools: { ...f.tools, mode: "all" } }))}
-                    />
-                    全ツール(既定)
-                  </label>
-                  <label className="radio-row">
-                    <input
-                      type="radio"
-                      name="def-tools-mode"
-                      checked={defForm.tools.mode === "selected"}
-                      onChange={() => setDefForm((f) => ({ ...f, tools: { ...f.tools, mode: "selected" } }))}
-                    />
-                    選択したツールのみ
-                  </label>
-                  {defForm.tools.mode === "selected" && (
-                    <>
-                      {AGENT_TOOL_OPTIONS.map((opt) => (
-                        <label key={opt.value} className="checkbox-row">
-                          <input
-                            type="checkbox"
-                            checked={defForm.tools.checked.includes(opt.value)}
-                            onChange={(e) =>
-                              setDefForm((f) => ({
-                                ...f,
-                                tools: {
-                                  ...f.tools,
-                                  checked: e.target.checked
-                                    ? [...f.tools.checked, opt.value]
-                                    : f.tools.checked.filter((v) => v !== opt.value),
-                                },
-                              }))
-                            }
-                          />
-                          {opt.label}({opt.value})
-                        </label>
-                      ))}
-                      <label>
-                        その他(手入力・カンマ区切り。認識できない名前は Copilot 側で無視されます)
-                        <input
-                          type="text"
-                          value={defForm.tools.other}
-                          onChange={(e) =>
-                            setDefForm((f) => ({ ...f, tools: { ...f.tools, other: e.target.value } }))
-                          }
-                        />
-                      </label>
-                    </>
-                  )}
-                </div>
-                <label>
-                  本文(Instructions)
-                  <textarea
-                    className="prompt-input"
-                    rows={6}
-                    value={defForm.body}
-                    onChange={(e) => setDefForm((f) => ({ ...f, body: e.target.value }))}
-                  />
-                </label>
-                <div className="run-controls">
-                  <button type="button" onClick={handleSaveDefinition}>
-                    保存
-                  </button>
-                  <button type="button" onClick={handleDeleteDefinition}>
-                    削除
-                  </button>
-                </div>
-                {defSaveStatus && <p className="muted">{defSaveStatus}</p>}
-              </>
-            )}
-          </div>
-        )}
-        {definitionError && <p className="error">⚠ {definitionError}</p>}
         {selected && (
-          <div className="config-form">
-            <h3>入出力設定</h3>
-            <label>
-              入力フォルダ
-              <div className="folder-row">
-                <input
-                  type="text"
-                  value={form.inputDir}
-                  onChange={(e) => updateForm({ inputDir: e.target.value })}
-                />
-                <button type="button" onClick={() => handlePickFolder("inputDir")}>
-                  選択...
-                </button>
-              </div>
-            </label>
-            <label>
-              出力フォルダ
-              <div className="folder-row">
-                <input
-                  type="text"
-                  value={form.outputDir}
-                  onChange={(e) => updateForm({ outputDir: e.target.value })}
-                />
-                <button type="button" onClick={() => handlePickFolder("outputDir")}>
-                  選択...
-                </button>
-              </div>
-            </label>
-            <PermissionToolsField
-              label="自動承認ツール(確認なしで実行を許可)"
-              description="チェックした種類の操作は、承認ダイアログを出さずに実行されます。実行中のダイアログで「常に許可」を選ぶと、ここに自動で追加されます。"
-              advancedHint="shell(python:*)"
-              state={form.allowedTools}
-              onChange={(next) => updateForm({ allowedTools: next })}
-              showNotes
-              afterOptions={
-                <div>
-                  <label className="checkbox-row">
-                    <input
-                      type="checkbox"
-                      checked={form.autoApprove}
-                      onChange={(e) => updateForm({ autoApprove: e.target.checked })}
-                    />
-                    ファイル書き込み(出力フォルダの中のみ)
-                  </label>
-                  <p className="muted hint">
-                    推奨・既定オン。出力フォルダの外への書き込みは確認ダイアログが出ます。
-                  </p>
-                </div>
-              }
-            />
-            <PermissionToolsField
-              label="拒否ツール(常にブロック)"
-              description="チェックした種類の操作は確認なしで拒否されます。自動承認より優先されます。"
-              advancedHint="shell(rm)"
-              state={form.deniedTools}
-              onChange={(next) => updateForm({ deniedTools: next })}
-            />
-            <div className="run-controls">
-              <button type="button" onClick={handleSaveConfig}>
-                保存
-              </button>
-            </div>
-            {saveStatus && <p className="muted">{saveStatus}</p>}
+          <div className="run-controls">
+            <button type="button" onClick={() => openAgentEditor(selected, setError)}>
+              ⚙ 設定を開く(別ウインドウ)
+            </button>
           </div>
         )}
         {appConfig && appConfig.forcedDeniedTools.length > 0 && (
