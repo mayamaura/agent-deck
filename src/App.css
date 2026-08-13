@@ -45,7 +45,9 @@ body {
   padding: 0;
 }
 
-.agents button {
+/* エージェント一覧のボタンだけ全幅にする。設定フォーム内の「選択...」「保存」等まで
+   全幅になると隣の入力欄が潰れるため、直下の ul に限定する。 */
+.agents > ul button {
   display: block;
   width: 100%;
   text-align: left;
@@ -57,10 +59,10 @@ body {
   border-radius: 4px;
 }
 
-.agents button:hover { background: #eef3fb; }
-.agents button.selected { background: #dbe7f8; }
+.agents > ul button:hover { background: #eef3fb; }
+.agents > ul button.selected { background: #dbe7f8; }
 
-.agents button span {
+.agents > ul button span {
   display: block;
   font-size: 12px;
 }
@@ -123,6 +125,7 @@ body {
 .definition-editor .folder-row input,
 .shared-settings .folder-row input {
   flex: 1;
+  min-width: 0; /* input の min-content 幅(既定 20 文字)で行がはみ出すのを防ぐ */
 }
 
 .new-agent-row {
@@ -133,6 +136,7 @@ body {
 
 .new-agent-row input {
   flex: 1;
+  min-width: 0;
   font: inherit;
   padding: 4px;
 }
