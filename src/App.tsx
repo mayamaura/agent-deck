@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -334,6 +334,7 @@ function PermissionToolsField({
   state,
   onChange,
   showNotes,
+  afterOptions,
 }: {
   label: string;
   /** ラベル直下に出す説明(この欄が何をするものかの一文)。 */
@@ -342,6 +343,10 @@ function PermissionToolsField({
   state: PermissionToolsFormState;
   onChange: (next: PermissionToolsFormState) => void;
   showNotes?: boolean;
+  /** チェックボックス群の直後(高度なパターン欄の前)に挿し込む追加行。
+   * 自動承認ツール側で「出力フォルダのみの書き込み自動承認」を write の直下に
+   * 連続配置するために使う(ユーザー要望: 書き込み系の設定を離さない)。 */
+  afterOptions?: ReactNode;
 }) {
   return (
     <div className="tools-field">
@@ -367,6 +372,7 @@ function PermissionToolsField({
           {showNotes && opt.note && <p className="muted hint">{opt.note}</p>}
         </div>
       ))}
+      {afterOptions}
       <label>
         高度なパターン(手入力・カンマ区切り。例: {advancedHint})
         <input type="text" value={state.other} onChange={(e) => onChange({ ...state, other: e.target.value })} />
@@ -1182,6 +1188,21 @@ export default function App() {
               state={form.allowedTools}
               onChange={(next) => updateForm({ allowedTools: next })}
               showNotes
+              afterOptions={
+                <div>
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={form.autoApprove}
+                      onChange={(e) => updateForm({ autoApprove: e.target.checked })}
+                    />
+                    ファイル書き込み(出力フォルダの中のみ)
+                  </label>
+                  <p className="muted hint">
+                    推奨・既定オン。出力フォルダの外への書き込みは確認ダイアログが出ます。
+                  </p>
+                </div>
+              }
             />
             <PermissionToolsField
               label="拒否ツール(常にブロック)"
@@ -1190,17 +1211,6 @@ export default function App() {
               state={form.deniedTools}
               onChange={(next) => updateForm({ deniedTools: next })}
             />
-            <label className="checkbox-row">
-              <input
-                type="checkbox"
-                checked={form.autoApprove}
-                onChange={(e) => updateForm({ autoApprove: e.target.checked })}
-              />
-              出力フォルダへの書き込みを自動承認する
-            </label>
-            <p className="muted hint">
-              オンでも出力フォルダの外への書き込みは確認ダイアログが出ます(フォルダで書き込み許可を分ける仕組み)。
-            </p>
             <div className="run-controls">
               <button type="button" onClick={handleSaveConfig}>
                 保存
