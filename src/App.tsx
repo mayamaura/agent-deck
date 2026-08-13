@@ -748,6 +748,51 @@ export default function App() {
     }
   }
 
+  /** 実行履歴の1行を実行ビューのタブとして開く(会話のレジューム)。過去のイベントログは
+   * 保存していないため、履歴行(依頼文・結果概要)から会話を復元する。続きの依頼は
+   * 既存の返信欄 → reply_task(resume)がそのまま使える。 */
+  function openHistorySession(h: HistoryEntry) {
+    setSessions((prev) => {
+      if (prev[h.sessionId]) return prev; // 画面に残っているタブはそのまま使う
+      const time = new Date(h.startedAt).toLocaleTimeString();
+      const started: AppEvent = {
+        kind: "taskStarted",
+        sessionId: h.sessionId,
+        agentId: h.agentId,
+        startedAt: h.startedAt,
+        prompt: h.prompt,
+      };
+      const terminal: AppEvent =
+        h.status === "completed"
+          ? {
+              kind: "taskCompleted",
+              sessionId: h.sessionId,
+              summary: h.summary || "(この実行の結果概要は記録されていません)",
+              outputFiles: h.outputFiles,
+            }
+          : h.status === "failed"
+            ? {
+                kind: "taskFailed",
+                sessionId: h.sessionId,
+                error: h.summary || "(エラー内容は記録されていません)",
+              }
+            : { kind: "taskCancelled", sessionId: h.sessionId };
+      return {
+        ...prev,
+        [h.sessionId]: {
+          agentId: h.agentId,
+          events: [
+            { time, event: started },
+            { time, event: terminal },
+          ],
+          rowStartedAt: {},
+          respondedRequestIds: new Set(),
+        },
+      };
+    });
+    setActiveSessionId(h.sessionId);
+  }
+
   /** タスク完了後の追い返信(v1.0 経路B)。同じ session_id を resume して続きを実行する。 */
   async function handleReply() {
     if (!activeSessionId || !replyMessage.trim()) return;
@@ -1076,7 +1121,13 @@ export default function App() {
               className="prompt-input"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
-              placeholder="依頼内容を入力してください"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && e.ctrlKey) {
+                  e.preventDefault();
+                  handleRun();
+                }
+              }}
+              placeholder="依頼内容を入力してください(Ctrl+Enter で実行)"
               rows={3}
             />
             <div className="run-controls">
@@ -1110,6 +1161,21 @@ export default function App() {
         )}
         {activeSession ? (
           <>
+            {/* 継続セッションの会話表示: 過去のターン(依頼→結果)を古い順に並べ、
+                その下に現在の実行ツリーが続く(会話のレジューム)。 */}
+            {tree.turns.length > 0 && (
+              <p className="muted">🔗 継続した会話です({tree.turns.length + 1} 回目の依頼)</p>
+            )}
+            {tree.turns.map((t, i) => (
+              <div className="conversation-turn" key={i}>
+                <p className="conversation-prompt">🖐 {t.prompt ?? "(依頼内容は記録されていません)"}</p>
+                <p className="conversation-result">
+                  {t.status === "completed" ? "✅" : t.status === "failed" ? "❌" : "⏹"}{" "}
+                  {t.summary ?? "(結果なし)"}
+                </p>
+              </div>
+            ))}
+            {tree.prompt && <p className="conversation-prompt">🖐 {tree.prompt}</p>}
             {tree.taskStatus === "running" && (
               <div className="run-controls">
                 <button onClick={handleCancel}>中断</button>
@@ -1143,15 +1209,22 @@ export default function App() {
                 <p>{tree.summary}</p>
               </div>
             )}
-            {(tree.taskStatus === "completed" || tree.taskStatus === "failed") && (
+            {(tree.taskStatus === "completed" || tree.taskStatus === "failed" || tree.taskStatus === "cancelled") && (
               <div className="task-summary">
                 <h3>続けて依頼する(このセッションに返信)</h3>
+                <p className="muted">これまでの会話は保持したまま、同じセッションの続きとして実行します。</p>
                 <textarea
                   className="prompt-input"
                   rows={2}
                   value={replyMessage}
                   onChange={(e) => setReplyMessage(e.target.value)}
-                  placeholder="続けて依頼する内容を入力してください"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && e.ctrlKey) {
+                      e.preventDefault();
+                      handleReply();
+                    }
+                  }}
+                  placeholder="続けて依頼する内容を入力してください(Ctrl+Enter で送信)"
                 />
                 <div className="run-controls">
                   <button type="button" onClick={handleReply} disabled={!replyMessage.trim()}>
@@ -1222,11 +1295,14 @@ export default function App() {
                 <th>状態</th>
                 <th>所要</th>
                 <th>トークン</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
               {history.map((h) => (
-                <tr key={h.sessionId}>
+                // 継続依頼(resume)では同じ sessionId の履歴行が実行ごとに増えるため、
+                // startedAt と組み合わせて一意にする。
+                <tr key={`${h.sessionId}:${h.startedAt}`}>
                   <td>{h.startedAt}</td>
                   <td>{h.agentId}</td>
                   <td>{TRIGGER_LABEL[h.trigger]}</td>
@@ -1237,6 +1313,11 @@ export default function App() {
                   </td>
                   <td>{Math.round(h.durationMs / 1000)} 秒</td>
                   <td>{h.totalTokens != null ? h.totalTokens : "—"}</td>
+                  <td>
+                    <button type="button" onClick={() => openHistorySession(h)}>
+                      会話を開く
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>

@@ -74,6 +74,8 @@ export interface HistoryEntry {
   status: "completed" | "failed" | "cancelled";
   outputFiles: string[];
   totalTokens: number | null;
+  // 完了時の最終メッセージ(失敗時はエラー文)。旧履歴行には無いため空文字のことがある。
+  summary: string;
   subagents: { name: string; durationMs: number }[];
   // "manual" / "scheduled"(docs/roadmap.md v0.4)。
   trigger: "manual" | "scheduled";
@@ -102,7 +104,7 @@ export interface QueueStatusDto {
 
 // src-tauri/src/events.rs AppEvent(kind でタグ付けされた単一チャネル "agent://event")
 export type AppEvent =
-  | { kind: "taskStarted"; sessionId: string; agentId: string; startedAt: string }
+  | { kind: "taskStarted"; sessionId: string; agentId: string; startedAt: string; prompt: string }
   | { kind: "agentIntent"; sessionId: string; agentId: string | null; text: string }
   | { kind: "subagentStarted"; sessionId: string; agentId: string; toolCallId: string; displayName: string }
   | { kind: "subagentCompleted"; sessionId: string; agentId: string; toolCallId: string; durationMs: number; totalTokens: number | null }

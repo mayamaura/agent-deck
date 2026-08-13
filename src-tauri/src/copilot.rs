@@ -1115,8 +1115,12 @@ pub async fn run_task(
     let started_at = format_rfc3339_now();
     // RunOutcome.duration_ms は「開始時刻からの所要」(docs/development.md ステップ6)。
     let task_start = Instant::now();
-    let task_started_event =
-        AppEvent::TaskStarted { session_id: session_id.clone(), agent_id: spec.agent_id, started_at: started_at.clone() };
+    let task_started_event = AppEvent::TaskStarted {
+        session_id: session_id.clone(),
+        agent_id: spec.agent_id,
+        started_at: started_at.clone(),
+        prompt: spec.prompt.clone(),
+    };
     audit.record_event(&session_id, &task_started_event);
     sink(task_started_event);
 

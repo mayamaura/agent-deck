@@ -296,6 +296,27 @@ body {
   margin-bottom: 4px;
 }
 
+/* 継続セッションの会話表示(過去のターン: 依頼→結果) */
+.conversation-turn {
+  margin: 6px 0;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed #ddd;
+}
+
+.conversation-prompt {
+  margin: 4px 0;
+  padding: 4px 8px;
+  background: #f0f4ff;
+  border-radius: 6px;
+  white-space: pre-wrap;
+}
+
+.conversation-result {
+  margin: 4px 0 0;
+  color: #444;
+  white-space: pre-wrap;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;

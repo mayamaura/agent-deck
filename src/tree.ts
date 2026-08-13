@@ -40,6 +40,15 @@ export interface AgentRow {
   }[];
 }
 
+/** 継続依頼(reply_task の resume)で終わった過去の実行 1 回分。会話表示用。 */
+export interface PastTurn {
+  prompt: string | null;
+  /** taskCompleted の summary。失敗時は taskError。 */
+  summary: string | null;
+  status: "running" | "completed" | "failed" | "cancelled";
+  startedAt: string | null;
+}
+
 export interface TreeState {
   main: AgentRow | null;
   subagents: AgentRow[]; // 出現順
@@ -49,6 +58,10 @@ export interface TreeState {
   taskError: string | null;
   outputFiles: string[];
   startedAt: string | null;
+  /** 現在の実行の依頼文(taskStarted.prompt)。 */
+  prompt: string | null;
+  /** 同一セッションで終わった過去の実行(古い順)。会話として現在の実行の上に表示する。 */
+  turns: PastTurn[];
 }
 
 function newRow(key: string, label: string, isMain: boolean): AgentRow {
@@ -122,6 +135,8 @@ export function buildTree(events: AppEvent[], respondedRequestIds: ReadonlySet<s
     taskError: null,
     outputFiles: [],
     startedAt: null,
+    prompt: null,
+    turns: [],
   };
 
   // PermissionRequested には所有エージェントの相関 ID が無い(events.rs 参照。
@@ -139,8 +154,14 @@ export function buildTree(events: AppEvent[], respondedRequestIds: ReadonlySet<s
     switch (ev.kind) {
       case "taskStarted": {
         if (state.taskStatus !== "idle") {
-          // 同一配列に複数実行分のイベントが混ざっていても直近の実行だけを反映する
-          // (App.tsx は通常 taskStarted ごとにログをリセットするが、念のための防御)。
+          // 継続依頼(reply_task の resume)では同一セッションに複数実行分のイベントが並ぶ。
+          // 直前の実行を「過去のターン」として退避し、会話として表示できるようにする。
+          state.turns.push({
+            prompt: state.prompt,
+            summary: state.summary ?? state.taskError,
+            status: state.taskStatus,
+            startedAt: state.startedAt,
+          });
           state.main = null;
           state.subagents = [];
           state.usage = null;
@@ -152,6 +173,7 @@ export function buildTree(events: AppEvent[], respondedRequestIds: ReadonlySet<s
         row.label = ev.agentId;
         row.status = "running";
         state.startedAt = ev.startedAt;
+        state.prompt = ev.prompt;
         state.taskStatus = "running";
         activeKey = "main";
         break;

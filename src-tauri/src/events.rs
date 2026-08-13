@@ -16,6 +16,9 @@ pub enum AppEvent {
         session_id: String,
         agent_id: String,
         started_at: String,
+        /// この実行の依頼文。継続依頼(resume)時に会話をターン単位で表示するために使う
+        /// (フロントの tree.ts が taskStarted ごとにターンを区切る)。
+        prompt: String,
     },
     AgentIntent {
         session_id: String,

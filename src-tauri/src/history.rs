@@ -18,6 +18,10 @@ pub struct HistoryEntry {
     pub status: String,
     pub output_files: Vec<String>,
     pub total_tokens: Option<u64>,
+    /// 完了時の最終メッセージ(失敗時はエラー文)。履歴からのレジューム時に過去の会話を
+    /// 復元表示するために使う。旧バージョンの履歴行には無いため欠落時は空文字(後方互換)。
+    #[serde(default)]
+    pub summary: String,
     #[serde(default)]
     pub subagents: Vec<SubagentRecord>,
     /// "manual" / "scheduled"(docs/roadmap.md v0.4)。旧バージョンの履歴行には無いため、
@@ -56,6 +60,7 @@ pub fn entry_from_outcome(agent_id: &str, prompt: &str, outcome: &RunOutcome, tr
         status: status.to_string(),
         output_files: outcome.output_files.clone(),
         total_tokens: outcome.total_tokens,
+        summary: outcome.summary.clone(),
         subagents: outcome
             .subagents
             .iter()
