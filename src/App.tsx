@@ -329,12 +329,15 @@ function AgentRowView({
  * 括弧付きパターン等は「高度なパターン」欄に手入力する。 */
 function PermissionToolsField({
   label,
+  description,
   advancedHint,
   state,
   onChange,
   showNotes,
 }: {
   label: string;
+  /** ラベル直下に出す説明(この欄が何をするものかの一文)。 */
+  description?: string;
   advancedHint: string;
   state: PermissionToolsFormState;
   onChange: (next: PermissionToolsFormState) => void;
@@ -343,6 +346,7 @@ function PermissionToolsField({
   return (
     <div className="tools-field">
       <span className="tools-field-label">{label}</span>
+      {description && <p className="muted hint">{description}</p>}
       {PERMISSION_TOOL_OPTIONS.map((opt) => (
         <div key={opt.value}>
           <label className="checkbox-row">
@@ -1172,14 +1176,16 @@ export default function App() {
               </div>
             </label>
             <PermissionToolsField
-              label="許可ツール"
+              label="自動承認ツール(確認なしで実行を許可)"
+              description="チェックした種類の操作は、承認ダイアログを出さずに実行されます。実行中のダイアログで「常に許可」を選ぶと、ここに自動で追加されます。"
               advancedHint="shell(python:*)"
               state={form.allowedTools}
               onChange={(next) => updateForm({ allowedTools: next })}
               showNotes
             />
             <PermissionToolsField
-              label="拒否ツール"
+              label="拒否ツール(常にブロック)"
+              description="チェックした種類の操作は確認なしで拒否されます。自動承認より優先されます。"
               advancedHint="shell(rm)"
               state={form.deniedTools}
               onChange={(next) => updateForm({ deniedTools: next })}
@@ -1192,6 +1198,9 @@ export default function App() {
               />
               出力フォルダへの書き込みを自動承認する
             </label>
+            <p className="muted hint">
+              オンでも出力フォルダの外への書き込みは確認ダイアログが出ます(フォルダで書き込み許可を分ける仕組み)。
+            </p>
             <div className="run-controls">
               <button type="button" onClick={handleSaveConfig}>
                 保存
