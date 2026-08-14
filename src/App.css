@@ -1,50 +1,146 @@
-/* 情報密度優先・装飾最小(docs/requirements.md §3.5)。フォント 13px 以上。 */
+/* 近未来 HUD テーマ(ダーク)。docs/requirements.md §3.5 の
+   「情報密度優先」「状態を色だけで表現しない(アイコン+テキスト併用)」
+   「13px 以上」は維持したまま、見た目だけを更新している。 */
+
+:root {
+  --bg: #070b14;
+  --panel: rgba(17, 25, 42, 0.72);
+  --panel-2: rgba(11, 17, 30, 0.9);
+  --line: rgba(120, 180, 255, 0.16);
+  --line-strong: rgba(120, 200, 255, 0.4);
+  --text: #dbe7f7;
+  --text-dim: #8ba0bf;
+  --accent: #4de3ff;
+  --accent-2: #9d7bff;
+  --ok: #3ddc97;
+  --warn: #ffc46b;
+  --err: #ff5c7a;
+  --radius: 10px;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
 * {
   box-sizing: border-box;
   margin: 0;
 }
 
+html,
+body {
+  height: 100%;
+}
+
 body {
   font-family: "Yu Gothic UI", "Meiryo UI", sans-serif;
   font-size: 13px;
-  color: #1a1a1a;
-  background: #f5f5f5;
+  color: var(--text);
+  background:
+    radial-gradient(900px 600px at 12% -10%, rgba(77, 227, 255, 0.1), transparent 60%),
+    radial-gradient(800px 500px at 105% 8%, rgba(157, 123, 255, 0.12), transparent 60%),
+    var(--bg);
+  background-attachment: fixed;
+}
+
+/* 背景のうっすらしたグリッド(HUD 感を出すための一枚)。操作を邪魔しないよう最背面に固定。 */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(120, 180, 255, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(120, 180, 255, 0.045) 1px, transparent 1px);
+  background-size: 44px 44px;
+}
+
+::selection {
+  background: rgba(77, 227, 255, 0.3);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(120, 180, 255, 0.22);
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(120, 200, 255, 0.4);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .layout {
   display: grid;
-  grid-template-columns: 240px 1fr 280px;
+  grid-template-columns: 260px 1fr 300px;
   grid-template-rows: 1fr 200px;
   grid-template-areas:
     "agents run detail"
     "agents history history";
   height: 100vh;
-  gap: 1px;
-  background: #ccc;
+  gap: 10px;
+  padding: 10px;
 }
 
 .pane {
-  background: #fff;
-  padding: 8px;
+  background: var(--panel);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px 12px;
   overflow-y: auto;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 .pane h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 13px;
-  color: #555;
-  margin-bottom: 6px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  color: var(--text);
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+/* 見出し左のインジケータ。パネルが「生きている計器」に見えるようにする。 */
+.pane h2::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--accent);
 }
 
 /* エージェント設定ウインドウ(AgentEditor.tsx)。3 ペインの layout は使わない。 */
 .editor-window {
-  background: #fff;
   min-height: 100vh;
-  padding: 10px 12px;
+  padding: 14px 16px;
 }
 
 .editor-window h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 14px;
-  margin-bottom: 6px;
+  letter-spacing: 0.1em;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.editor-window h2::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--accent);
 }
 
 /* 1 枚もののウインドウなので、最初のセクションの区切り線は不要。 */
@@ -59,6 +155,47 @@ body {
 .detail { grid-area: detail; }
 .history { grid-area: history; }
 
+/* ── エージェント = 人格。ID から決まる色相のアバターで「誰がいるか」を見せる ── */
+
+.avatar {
+  --hue: 200;
+  position: relative;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  font-weight: 700;
+  color: hsl(var(--hue) 95% 90%);
+  background:
+    radial-gradient(circle at 32% 26%, hsl(var(--hue) 90% 52%), hsl(var(--hue) 85% 22%) 70%);
+  box-shadow:
+    0 0 0 1px hsl(var(--hue) 90% 62% / 0.5),
+    0 0 14px hsl(var(--hue) 90% 50% / 0.35);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+}
+
+/* 実行中は呼吸するリング。止まっている状態との差を動きで示す。 */
+.avatar-running::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 1px solid hsl(var(--hue) 95% 68% / 0.85);
+  animation: pulse-ring 1.8s ease-out infinite;
+}
+
+@keyframes pulse-ring {
+  0% { transform: scale(0.92); opacity: 0.9; }
+  100% { transform: scale(1.4); opacity: 0; }
+}
+
+.avatar-completed { box-shadow: 0 0 0 1px rgba(61, 220, 151, 0.6), 0 0 14px rgba(61, 220, 151, 0.3); }
+.avatar-failed { box-shadow: 0 0 0 1px rgba(255, 92, 122, 0.7), 0 0 14px rgba(255, 92, 122, 0.35); }
+.avatar-cancelled { filter: saturate(0.35); }
+
 .agents ul {
   list-style: none;
   padding: 0;
@@ -67,51 +204,159 @@ body {
 /* エージェント一覧のボタンだけ全幅にする。設定フォーム内の「選択...」「保存」等まで
    全幅になると隣の入力欄が潰れるため、直下の ul に限定する。 */
 .agents > ul button {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   width: 100%;
   text-align: left;
-  padding: 6px;
-  border: none;
-  background: none;
+  padding: 8px;
+  margin-bottom: 4px;
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text);
   cursor: pointer;
   font-size: 13px;
-  border-radius: 4px;
+  border-radius: 8px;
+  transition: background 0.15s, border-color 0.15s;
 }
 
-.agents > ul button:hover { background: #eef3fb; }
-.agents > ul button.selected { background: #dbe7f8; }
+.agents > ul button:hover {
+  background: rgba(77, 227, 255, 0.07);
+  border-color: var(--line);
+}
 
-.agents > ul button span {
+.agents > ul button.selected {
+  background: linear-gradient(90deg, rgba(77, 227, 255, 0.16), rgba(157, 123, 255, 0.08));
+  border-color: var(--line-strong);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.agent-card-body {
+  min-width: 0;
+  display: block;
+}
+
+.agent-card-body strong {
+  display: block;
+  font-weight: 600;
+}
+
+.agent-card-body .muted {
   display: block;
   font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.muted { color: #777; }
-.error { color: #b00020; }
+.muted { color: var(--text-dim); }
+.error { color: var(--err); }
 
 .badge {
   display: inline-block;
   margin-left: 6px;
-  padding: 1px 6px;
+  padding: 1px 7px;
   font-size: 11px;
-  color: #8a5a00;
-  background: #fff3cd;
-  border-radius: 3px;
+  color: var(--warn);
+  background: rgba(255, 196, 107, 0.12);
+  border: 1px solid rgba(255, 196, 107, 0.35);
+  border-radius: 999px;
+  vertical-align: middle;
+}
+
+.badge.scope-shared {
+  color: var(--accent);
+  background: rgba(77, 227, 255, 0.1);
+  border-color: rgba(77, 227, 255, 0.32);
+}
+
+.badge.scope-personal {
+  color: var(--accent-2);
+  background: rgba(157, 123, 255, 0.12);
+  border-color: rgba(157, 123, 255, 0.32);
+}
+
+/* ── フォーム部品 ── */
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: var(--text);
+}
+
+button {
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(120, 180, 255, 0.07);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+
+button:hover:not(:disabled) {
+  background: rgba(77, 227, 255, 0.16);
+  border-color: var(--line-strong);
+  box-shadow: 0 0 12px rgba(77, 227, 255, 0.2);
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+button.primary {
+  border-color: rgba(77, 227, 255, 0.55);
+  background: linear-gradient(135deg, rgba(77, 227, 255, 0.28), rgba(157, 123, 255, 0.24));
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+
+input[type="text"],
+input[type="number"],
+input[type="time"],
+select,
+textarea {
+  background: rgba(5, 10, 20, 0.6);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 5px 8px;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(77, 227, 255, 0.14);
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
+}
+
+::placeholder {
+  color: rgba(139, 160, 191, 0.65);
 }
 
 .config-form,
 .definition-editor,
 .shared-settings {
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px solid #eee;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
 }
 
 .config-form h3,
 .definition-editor h3,
-.shared-settings h3 {
+.shared-settings h3,
+.detail h3,
+.task-summary h3 {
   font-size: 12px;
-  color: #555;
+  letter-spacing: 0.1em;
+  color: var(--accent);
   margin-bottom: 6px;
 }
 
@@ -120,17 +365,15 @@ body {
 .shared-settings label {
   display: block;
   font-size: 12px;
-  color: #555;
-  margin-bottom: 6px;
+  color: var(--text-dim);
+  margin-bottom: 8px;
 }
 
 .config-form input[type="text"],
 .definition-editor input[type="text"],
 .shared-settings input[type="text"] {
   width: 100%;
-  font: inherit;
-  padding: 4px;
-  margin-top: 2px;
+  margin-top: 3px;
 }
 
 .config-form .folder-row,
@@ -150,25 +393,24 @@ body {
 .new-agent-row {
   display: flex;
   gap: 4px;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
 
 .new-agent-row input {
   flex: 1;
   min-width: 0;
-  font: inherit;
-  padding: 4px;
 }
 
 .definition-body {
-  font: inherit;
+  font-family: var(--mono);
   font-size: 12px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  background: #f7f7f7;
-  padding: 6px;
-  border-radius: 4px;
-  margin: 4px 0;
+  background: rgba(5, 10, 20, 0.6);
+  border: 1px solid var(--line);
+  padding: 8px;
+  border-radius: 8px;
+  margin: 6px 0;
 }
 
 .config-form .checkbox-row,
@@ -186,7 +428,7 @@ body {
 .tools-field-label {
   display: block;
   font-size: 12px;
-  color: #555;
+  color: var(--text-dim);
   margin-bottom: 2px;
 }
 
@@ -195,55 +437,59 @@ body {
   font-size: 11px;
 }
 
+/* エージェントからの問いかけ。人が話しかけてきた感じを出すため強めに光らせる。 */
 .permission-dialog {
-  margin-top: 4px;
-  padding: 6px;
+  margin-top: 6px;
+  padding: 8px 10px;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  background: #fff3cd;
-  border: 1px solid #e0c060;
-  border-radius: 4px;
+  background: rgba(255, 196, 107, 0.09);
+  border: 1px solid rgba(255, 196, 107, 0.4);
+  border-radius: 10px;
+  box-shadow: 0 0 18px rgba(255, 196, 107, 0.12);
 }
 
 .prompt-input {
   width: 100%;
-  font: inherit;
-  padding: 4px;
-  margin-bottom: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  resize: vertical;
 }
 
 .run-controls {
   display: flex;
   gap: 6px;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
 
 .event-log {
   list-style: none;
   padding: 0;
+  font-family: var(--mono);
   font-size: 12px;
 }
 
 .event-log li {
-  padding: 2px 0;
-  border-bottom: 1px solid #eee;
+  padding: 3px 0;
+  border-bottom: 1px solid rgba(120, 180, 255, 0.08);
+  overflow-wrap: anywhere;
 }
 
 .agent-tree {
-  margin-top: 8px;
+  margin-top: 10px;
 }
 
 .agent-row {
-  padding: 6px 0;
-  border-bottom: 1px solid #eee;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(120, 180, 255, 0.1);
 }
 
 .sub-indent {
-  margin-left: 18px;
-  border-left: 2px solid #ddd;
-  padding-left: 8px;
+  margin-left: 15px;
+  padding-left: 12px;
+  border-left: 1px solid rgba(77, 227, 255, 0.28);
 }
 
 .agent-row-header {
@@ -253,67 +499,81 @@ body {
   flex-wrap: wrap;
 }
 
-.tree-marker {
-  color: #888;
-}
-
 .status-badge {
+  font-family: var(--mono);
   font-size: 12px;
-  padding: 1px 6px;
-  border-radius: 3px;
-  background: #eee;
-  color: #444;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--line);
+  color: var(--text-dim);
 }
 
-.status-badge.status-running { background: #e3f0ff; color: #0b5bd3; }
-.status-badge.status-completed { background: #e6f6ea; color: #197a34; }
-.status-badge.status-failed { background: #fde8e8; color: #b00020; }
-.status-badge.status-cancelled { background: #f1f1f1; color: #666; }
+.status-badge.status-running {
+  background: rgba(77, 227, 255, 0.12);
+  border-color: rgba(77, 227, 255, 0.45);
+  color: var(--accent);
+}
+.status-badge.status-completed {
+  background: rgba(61, 220, 151, 0.12);
+  border-color: rgba(61, 220, 151, 0.4);
+  color: var(--ok);
+}
+.status-badge.status-failed {
+  background: rgba(255, 92, 122, 0.12);
+  border-color: rgba(255, 92, 122, 0.45);
+  color: var(--err);
+}
+.status-badge.status-cancelled {
+  color: var(--text-dim);
+}
 
+/* 「現在なにをしているか」は本人の発言として吹き出しで見せる。 */
 .agent-intent {
-  margin: 4px 0 0;
-  color: #444;
+  margin: 6px 0 0 40px;
+  padding: 6px 10px;
+  color: var(--text);
   font-size: 12px;
+  background: rgba(77, 227, 255, 0.07);
+  border: 1px solid rgba(77, 227, 255, 0.22);
+  border-radius: 12px 12px 12px 3px;
 }
 
 .tool-list {
   list-style: none;
-  margin: 4px 0 0;
-  padding-left: 20px;
+  margin: 6px 0 0 40px;
+  padding-left: 10px;
+  border-left: 1px dashed rgba(120, 180, 255, 0.25);
+  font-family: var(--mono);
   font-size: 12px;
-  color: #444;
+  color: var(--text-dim);
 }
 
 .task-summary {
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px solid #eee;
-}
-
-.task-summary h3 {
-  font-size: 12px;
-  color: #555;
-  margin-bottom: 4px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
 }
 
 /* 継続セッションの会話表示(過去のターン: 依頼→結果) */
 .conversation-turn {
-  margin: 6px 0;
-  padding-bottom: 6px;
-  border-bottom: 1px dashed #ddd;
+  margin: 8px 0;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed rgba(120, 180, 255, 0.18);
 }
 
 .conversation-prompt {
   margin: 4px 0;
-  padding: 4px 8px;
-  background: #f0f4ff;
-  border-radius: 6px;
+  padding: 6px 10px;
+  background: rgba(157, 123, 255, 0.12);
+  border: 1px solid rgba(157, 123, 255, 0.25);
+  border-radius: 12px 12px 3px 12px;
   white-space: pre-wrap;
 }
 
 .conversation-result {
-  margin: 4px 0 0;
-  color: #444;
+  margin: 6px 0 0;
+  color: var(--text-dim);
   white-space: pre-wrap;
 }
 
@@ -324,22 +584,43 @@ table {
 
 th, td {
   text-align: left;
-  padding: 3px 8px;
-  border-bottom: 1px solid #eee;
+  padding: 4px 8px;
+  border-bottom: 1px solid rgba(120, 180, 255, 0.1);
 }
 
-th { color: #555; font-weight: normal; }
+td {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+th {
+  color: var(--accent);
+  font-weight: normal;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+}
+
+tbody tr:hover {
+  background: rgba(77, 227, 255, 0.05);
+}
 
 .update-banner {
-  padding: 6px 12px;
-  background: #e3f0ff;
-  border-bottom: 1px solid #b8d4f5;
+  margin: 10px 10px 0;
+  padding: 8px 12px;
+  background: rgba(77, 227, 255, 0.1);
+  border: 1px solid rgba(77, 227, 255, 0.35);
+  border-radius: var(--radius);
   font-size: 13px;
 }
 
 .update-banner-danger {
-  background: #fde8e8;
-  border-bottom-color: #f0b8b8;
+  background: rgba(255, 92, 122, 0.1);
+  border-color: rgba(255, 92, 122, 0.4);
+}
+
+/* バナーが出ている間は layout の高さを詰めて、画面外にはみ出さないようにする。 */
+.update-banner ~ .layout {
+  height: calc(100vh - 48px);
 }
 
 .update-banner-row {
@@ -353,14 +634,16 @@ th { color: #555; font-weight: normal; }
 }
 
 .update-banner-warning {
-  color: #b00020;
+  color: var(--err);
   font-weight: bold;
 }
 
 .app-version {
-  margin-top: 10px;
+  margin-top: 12px;
   padding-top: 8px;
-  border-top: 1px solid #eee;
+  border-top: 1px solid var(--line);
+  font-family: var(--mono);
+  letter-spacing: 0.08em;
 }
 
 /* 実行ビュー上部のダッシュボード帯・セッションタブ(docs/roadmap.md v0.5)。 */
@@ -369,9 +652,11 @@ th { color: #555; font-weight: normal; }
   align-items: center;
   flex-wrap: wrap;
   gap: 10px;
-  margin-bottom: 8px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid #eee;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
 }
 
 .dashboard-chips {
@@ -384,42 +669,57 @@ th { color: #555; font-weight: normal; }
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 8px;
-  border: 1px solid #ccc;
-  border-radius: 12px;
-  background: #f7f7f7;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
   cursor: pointer;
   font-size: 12px;
 }
 
+.dashboard-chip .avatar {
+  width: 20px;
+  height: 20px;
+  font-size: 11px;
+}
+
 .dashboard-chip.active {
-  border-color: #0b5bd3;
-  background: #e3f0ff;
+  border-color: var(--accent);
+  background: rgba(77, 227, 255, 0.14);
+  box-shadow: 0 0 14px rgba(77, 227, 255, 0.18);
 }
 
 .dashboard-failure {
-  color: #b00020;
+  color: var(--err);
 }
 
 .session-tabs {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  margin: 8px 0;
+  margin: 10px 0 0;
 }
 
 .session-tab {
-  padding: 4px 8px;
-  border: 1px solid #ccc;
+  padding: 5px 12px;
+  border: 1px solid var(--line);
   border-bottom: none;
-  border-radius: 4px 4px 0 0;
-  background: #f0f0f0;
+  border-radius: 8px 8px 0 0;
+  background: rgba(255, 255, 255, 0.03);
   cursor: pointer;
   font-size: 12px;
 }
 
 .session-tab.active {
-  background: #fff;
-  border-color: #0b5bd3;
-  font-weight: bold;
+  background: rgba(77, 227, 255, 0.14);
+  border-color: var(--line-strong);
+  color: var(--text);
+  font-weight: 600;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
 }

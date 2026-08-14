@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -177,6 +177,27 @@ function elapsedMsFor(row: AgentRow, rowStartedAt: Record<string, number>, nowTi
   return start != null ? nowTick - start : null;
 }
 
+/** エージェント名から決まる色相(0-359)。同じエージェントは毎回同じ顔色になり、
+ * 一覧・実行ツリー・ダッシュボードのどこで見ても「同じ人」だと分かる。 */
+function agentHue(name: string): number {
+  let h = 0;
+  for (const ch of name) h = (h * 31 + (ch.codePointAt(0) ?? 0)) % 360;
+  return h;
+}
+
+/** エージェントの顔。status を渡すと実行中はリングが脈打つ(生きている感じを出す)。 */
+function Avatar({ name, status }: { name: string; status?: AgentRow["status"] }) {
+  return (
+    <span
+      className={status ? `avatar avatar-${status}` : "avatar"}
+      style={{ "--hue": agentHue(name) } as CSSProperties}
+      aria-hidden
+    >
+      {[...name][0] ?? "?"}
+    </span>
+  );
+}
+
 /** 承認ダイアログの3択(docs/architecture.md §7.1 拡張)。respond_permission コマンドの
  * decision 引数と同じ文字列(Rust 側で copilot::PermissionReply に変換される)。 */
 type PermissionDecision = "approveOnce" | "approveAlways" | "deny";
@@ -235,7 +256,7 @@ function AgentRowView({
   return (
     <div className={isSub ? "agent-row sub" : "agent-row"}>
       <div className="agent-row-header">
-        <span className="tree-marker">▼</span>
+        <Avatar name={row.label} status={row.status} />
         <strong>
           {row.label}
           {isSub && " (サブ)"}
@@ -862,16 +883,19 @@ export default function App() {
                   onClick={() => setSelected(a.id)}
                   onDoubleClick={() => openAgentEditor(a.id, setError)}
                 >
-                  <strong>
-                    {a.name}
-                    <span className={`badge scope-${a.scope}`}>
-                      {a.scope === "shared" ? "🌐 共有" : "👤 個人"}
-                    </span>
-                    {a.version && <span className="muted">v{a.version}</span>}
-                    {a.shadowed && <span className="badge">個人版あり</span>}
-                    {unset && <span className="badge">⚠ 未設定</span>}
-                  </strong>
-                  <span className="muted">{a.description}</span>
+                  <Avatar name={a.name} />
+                  <span className="agent-card-body">
+                    <strong>
+                      {a.name}
+                      <span className={`badge scope-${a.scope}`}>
+                        {a.scope === "shared" ? "🌐 共有" : "👤 個人"}
+                      </span>
+                      {a.version && <span className="badge">v{a.version}</span>}
+                      {a.shadowed && <span className="badge">個人版あり</span>}
+                      {unset && <span className="badge">⚠ 未設定</span>}
+                    </strong>
+                    <span className="muted">{a.description}</span>
+                  </span>
                 </button>
               </li>
             );
@@ -1103,6 +1127,7 @@ export default function App() {
                   className={sid === activeSessionId ? "dashboard-chip active" : "dashboard-chip"}
                   onClick={() => setActiveSessionId(sid)}
                 >
+                  <Avatar name={s.agentId} status="running" />
                   <strong>{s.agentId}</strong>
                   <span className="muted">{elapsed != null ? formatDuration(elapsed) : "—"}</span>
                   {pending > 0 && <span className="badge">⚠ 承認待ち {pending}</span>}
@@ -1134,8 +1159,8 @@ export default function App() {
               rows={3}
             />
             <div className="run-controls">
-              <button onClick={handleRun} disabled={!prompt.trim()}>
-                実行
+              <button className="primary" onClick={handleRun} disabled={!prompt.trim()}>
+                ▶ 実行
               </button>
             </div>
             {runError && <p className="error">⚠ {runError}</p>}
