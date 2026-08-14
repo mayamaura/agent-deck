@@ -39,6 +39,8 @@ const EMPTY_FORM: ConfigFormState = {
 /** エージェント定義エディタ(個人スコープ)の編集用状態(docs/roadmap.md v0.2)。
  * tools はチェック集合+その他テキスト+全ツール/選択の切り替えで持つ(スペルミス防止。ユーザー要望)。 */
 interface DefinitionFormState {
+  /** エージェント ID(= 定義ファイル名)。保存時に変更されていればリネームしてから保存する。 */
+  id: string;
   name: string;
   description: string;
   model: string;
@@ -47,6 +49,7 @@ interface DefinitionFormState {
 }
 
 const EMPTY_DEF_FORM: DefinitionFormState = {
+  id: "",
   name: "",
   description: "",
   model: "",
@@ -115,6 +118,11 @@ function PermissionToolsField({
  * webview なので状態は共有しない。保存のたびに AGENTS_CHANGED を emit してメイン側に再取得させる。
  */
 export default function AgentEditor({ agentId }: { agentId: string }) {
+  // 編集中の実 ID。保存時のリネームで変わるので、prop ではなくこちらを全操作の対象にする。
+  // ponytail: ウインドウのラベルは開いた時の ID のまま(Tauri は付け替えられない)。
+  // リネーム後にメイン一覧から同じエージェントを開くと 2 枚目が開くが、単一ユーザーの
+  // デスクトップアプリなので放置する。困るようならリネーム時にウインドウを閉じる。
+  const [id, setId] = useState(agentId);
   const [definition, setDefinition] = useState<AgentDefinitionDto | null>(null);
   const [definitionError, setDefinitionError] = useState<string | null>(null);
   const [defForm, setDefForm] = useState<DefinitionFormState>(EMPTY_DEF_FORM);
@@ -126,6 +134,7 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
   function loadDefinition(d: AgentDefinitionDto) {
     setDefinition(d);
     setDefForm({
+      id: d.id,
       name: d.name,
       description: d.description,
       model: d.model ?? "",
@@ -135,7 +144,10 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
   }
 
   useEffect(() => {
-    document.title = `エージェント設定 — ${agentId}`;
+    document.title = `エージェント設定 — ${id}`;
+  }, [id]);
+
+  useEffect(() => {
     invoke<AgentDefinitionDto>("get_agent_definition", { agentId })
       .then(loadDefinition)
       .catch((e) => setDefinitionError(String(e)));
@@ -166,7 +178,7 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
       autoApproveWriteInOutputDir: form.autoApprove,
     };
     try {
-      await invoke("save_agent_config", { agentId, settings });
+      await invoke("save_agent_config", { agentId: id, settings });
       setSaveStatus("✅ 保存しました");
       await emit(AGENTS_CHANGED);
     } catch (e) {
@@ -177,8 +189,16 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
   async function handleSaveDefinition() {
     setDefSaveStatus(null);
     try {
+      // ID(= ファイル名)が変わっていれば先にリネームする。入出力設定・スケジュール・
+      // 既定の作業フォルダは Rust 側が一緒に付け替える。
+      const nextId = defForm.id.trim();
+      if (nextId !== id) {
+        await invoke("rename_agent_definition", { agentId: id, newId: nextId });
+        setId(nextId);
+        await emit(AGENTS_CHANGED);
+      }
       await invoke("save_agent_definition", {
-        agentId,
+        agentId: nextId,
         name: defForm.name,
         description: defForm.description,
         tools: composeAgentTools(defForm.tools),
@@ -193,9 +213,9 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
   }
 
   async function handleDeleteDefinition() {
-    if (!window.confirm(`エージェント定義「${agentId}」を削除しますか?`)) return;
+    if (!window.confirm(`エージェント定義「${id}」を削除しますか?`)) return;
     try {
-      await invoke("delete_agent_definition", { agentId });
+      await invoke("delete_agent_definition", { agentId: id });
       await emit(AGENTS_CHANGED);
       // 対象が消えたウインドウを残しても操作できないので閉じる。
       await getCurrentWebviewWindow().close();
@@ -207,10 +227,10 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
   async function handleDuplicateAgent() {
     setDefinitionError(null);
     try {
-      await invoke("duplicate_agent", { agentId });
+      await invoke("duplicate_agent", { agentId: id });
       await emit(AGENTS_CHANGED);
       // 複製後は個人優先で解決され直すため、編集可能な個人版を再取得する。
-      loadDefinition(await invoke<AgentDefinitionDto>("get_agent_definition", { agentId }));
+      loadDefinition(await invoke<AgentDefinitionDto>("get_agent_definition", { agentId: id }));
     } catch (e) {
       setDefinitionError(String(e));
     }
@@ -218,7 +238,7 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
 
   return (
     <div className="editor-window">
-      <h2>{agentId}</h2>
+      <h2>{id}</h2>
       {definitionError && <p className="error">⚠ {definitionError}</p>}
       {definition && (
         <div className="definition-editor">
@@ -238,6 +258,18 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
             </>
           ) : (
             <>
+              <label>
+                ID(定義ファイル名。保存時に変更されます)
+                <input
+                  type="text"
+                  value={defForm.id}
+                  onChange={(e) => setDefForm((f) => ({ ...f, id: e.target.value }))}
+                />
+              </label>
+              <p className="muted hint">
+                入出力設定・スケジュール・作業フォルダも一緒に移ります。履歴は旧 ID のまま残ります。
+                実行中は変更できません。
+              </p>
               <label>
                 名前
                 <input

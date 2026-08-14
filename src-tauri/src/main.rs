@@ -274,6 +274,70 @@ fn duplicate_agent(state: State<AppState>, agent_id: String) -> Result<(), Strin
     std::fs::write(&dest, text).map_err(|e| format!("{} に保存できません: {e}", dest.display()))
 }
 
+/// 個人定義のエージェント ID(= ファイル名)を作成後に変更する(ユーザー要望)。
+/// ID は agents.json / schedules.json / data/workspace/<id> のキーでもあるので、
+/// .agent.md のリネームだけでは設定とスケジュールが迷子になる。まとめて移し替える。
+/// 履歴・監査ログ(data/logs)は「その時点で何が動いたか」の記録なので書き換えない。
+#[tauri::command]
+fn rename_agent_definition(state: State<AppState>, agent_id: String, new_id: String) -> Result<(), String> {
+    validate_agent_id(&new_id)?;
+    if new_id == agent_id {
+        return Ok(());
+    }
+    let data_dir = state.data_dir()?;
+    // 実行中に定義を動かすと、その実行の追い返信・スケジュールが旧 ID を指したままになるので止める。
+    if state.running.lock().unwrap().values().any(|t| t.agent_id == agent_id) {
+        return Err(format!("実行中のエージェントは ID を変更できません: {agent_id}"));
+    }
+    let cfg = config::load_app_config(data_dir)?;
+    let personal_dirs = personal_scan_dirs(&cfg, data_dir)?;
+    let shared_dir = config::shared_agents_dir(data_dir);
+    let definitions = agents::scan_definitions(&personal_dirs, &shared_dir)?;
+    if definitions.iter().any(|d| d.id == new_id) {
+        return Err(format!("エージェント定義が既に存在します: {new_id}"));
+    }
+    let existing = definitions
+        .iter()
+        .find(|d| d.id == agent_id && d.scope == agents::AgentScope::Personal)
+        .ok_or_else(|| format!("個人のエージェント定義が見つかりません(共有定義は ID を変更できません): {agent_id}"))?;
+    let dest = existing.source_path.with_file_name(format!("{new_id}.agent.md"));
+    std::fs::rename(&existing.source_path, &dest).map_err(|e| {
+        format!("{} を {} に変更できません: {e}", existing.source_path.display(), dest.display())
+    })?;
+    rename_agent_data(data_dir, &agent_id, &new_id)
+}
+
+/// エージェント ID をキーに持つデータ(入出力設定・スケジュール・既定の作業フォルダ)を
+/// 新 ID へ移す。rename_agent_definition が .agent.md のリネーム後に呼ぶ。
+/// Tauri の State を触らないのでユニットテストできる。
+fn rename_agent_data(data_dir: &Path, old_id: &str, new_id: &str) -> Result<(), String> {
+    let mut agents_cfg = config::load_agents_config(data_dir)?;
+    if let Some(settings) = agents_cfg.agents.remove(old_id) {
+        agents_cfg.version = 1;
+        agents_cfg.agents.insert(new_id.to_string(), settings);
+        config::save_agents_config(data_dir, &agents_cfg)?;
+    }
+
+    let mut schedules = schedule::load(data_dir)?;
+    let mut changed = false;
+    for s in schedules.schedules.iter_mut().filter(|s| s.agent_id == old_id) {
+        s.agent_id = new_id.to_string();
+        changed = true;
+    }
+    if changed {
+        schedule::save(data_dir, &schedules)?;
+    }
+
+    // 入力フォルダ未設定時の既定の作業フォルダ(spawn_task_inner が data/workspace/<id> を使う)。
+    let workspace = data_dir.join("workspace");
+    let (old_dir, new_dir) = (workspace.join(old_id), workspace.join(new_id));
+    if old_dir.is_dir() && !new_dir.exists() {
+        std::fs::rename(&old_dir, &new_dir)
+            .map_err(|e| format!("{} を {} に変更できません: {e}", old_dir.display(), new_dir.display()))?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn delete_agent_definition(state: State<AppState>, agent_id: String) -> Result<(), String> {
     let data_dir = state.data_dir()?;
@@ -900,6 +964,7 @@ fn main() {
             save_agent_definition,
             create_agent_definition,
             duplicate_agent,
+            rename_agent_definition,
             delete_agent_definition,
             sync_shared_agents_cmd,
             get_app_config,
@@ -959,6 +1024,49 @@ mod tests {
         assert_eq!(d.body, "# 役割\n数字はスクリプトで出す");
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// ID 変更時、入出力設定・スケジュール・既定の作業フォルダが新 ID へ付いてくる
+    /// (付いてこないと設定が黙って消えたように見える)。
+    #[test]
+    fn rename_agent_data_moves_settings_schedules_and_workspace() {
+        let dir = std::env::temp_dir().join("agent_deck_test_main_rename");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("workspace").join("old-id")).unwrap();
+        std::fs::write(dir.join("workspace").join("old-id").join("memo.txt"), "作業中").unwrap();
+
+        let mut agents_cfg = config::AgentsConfig::default();
+        agents_cfg.agents.insert(
+            "old-id".into(),
+            AgentSettings { output_dir: Some(PathBuf::from("C:/out")), ..Default::default() },
+        );
+        config::save_agents_config(&dir, &agents_cfg).unwrap();
+        schedule::save(
+            &dir,
+            &schedule::SchedulesFile {
+                version: 1,
+                schedules: vec![schedule::Schedule {
+                    id: "s1".into(),
+                    agent_id: "old-id".into(),
+                    prompt: "p".into(),
+                    recurrence: schedule::Recurrence::Daily { time: "09:00".into() },
+                    enabled: true,
+                    last_run_at: None,
+                }],
+            },
+        )
+        .unwrap();
+
+        rename_agent_data(&dir, "old-id", "new-id").unwrap();
+
+        let agents_cfg = config::load_agents_config(&dir).unwrap();
+        assert!(!agents_cfg.agents.contains_key("old-id"));
+        assert_eq!(agents_cfg.agents["new-id"].output_dir.as_deref(), Some(Path::new("C:/out")));
+        assert_eq!(schedule::load(&dir).unwrap().schedules[0].agent_id, "new-id");
+        assert!(dir.join("workspace").join("new-id").join("memo.txt").is_file());
+        assert!(!dir.join("workspace").join("old-id").exists());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

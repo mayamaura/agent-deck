@@ -354,7 +354,10 @@ export default function App() {
 
   async function reloadAgents() {
     try {
-      setAgents(await invoke<AgentSummary[]>("list_agents"));
+      const list = await invoke<AgentSummary[]>("list_agents");
+      setAgents(list);
+      // 削除・ID 変更で選択中の ID が消えることがある。残すと実行時に「見つかりません」になる。
+      setSelected((cur) => (cur && list.some((a) => a.id === cur) ? cur : null));
     } catch (e) {
       setError(String(e));
     }

@@ -88,6 +88,7 @@ crates.io には Copilot CLI を制御する非公式クレートが複数存在
 | `save_agent_definition` | `agent_id`, 各フィールド | `()` | 個人スコープ定義の保存(共有はエラー) |
 | `create_agent_definition` | `agent_id`, 各フィールド | `()` | 個人スコープに新規作成 |
 | `duplicate_agent` | `agent_id` | `()` | 共有定義を同 id で個人へ複製(複製して編集) |
+| `rename_agent_definition` | `agent_id`, `new_id` | `()` | 個人スコープ定義の ID 変更(.agent.md のリネーム + agents.json / schedules.json / workspace の付け替え。実行中・共有はエラー) |
 | `delete_agent_definition` | `agent_id` | `()` | 個人スコープ定義の削除 |
 | `sync_shared_agents_cmd` | なし | `SyncSummary` | 共有元フォルダから data/shared-agents へ同期 |
 | `get_app_config` | なし | `AppConfigDto` | アプリ設定の取得(共有元フォルダ等) |
