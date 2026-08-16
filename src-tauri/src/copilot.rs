@@ -1270,6 +1270,194 @@ pub async fn run_task(
     })
 }
 
+// ===== エージェント定義の下書き生成(docs/roadmap.md v1.1 (b)) =====
+
+/// 定義エディタに流し込む下書き。**model は生成させない**: モデル名は SDK/CLI 側の語彙で
+/// 変わるため、古い名前を書かれると保存時ではなく実行時に初めて失敗する。空欄のまま
+/// アプリ既定(config.defaultModel)に委ねる。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftedAgent {
+    pub name: String,
+    pub description: String,
+    /// None は「全ツール」(定義エディタの既定と同じ)。
+    #[serde(default)]
+    pub tools: Option<Vec<String>>,
+    pub body: String,
+}
+
+/// `.agent.md` の tools に書ける公式エイリアス(src/toolCatalog.ts の AGENT_TOOL_OPTIONS と
+/// 同じ7種。変更時は両方直すこと)。**生成結果はこの集合で濾す**: 定義の tools は
+/// ガードレールそのものであり、LLM に任せると `*` や MCP の `server/tool` など
+/// 広がる方向に倒れるため(docs/roadmap.md v1.1 の論点)。広げるのは人の明示操作に限る。
+const KNOWN_AGENT_TOOLS: [&str; 7] = ["execute", "read", "edit", "search", "agent", "web", "todo"];
+
+const DRAFTER_AGENT_NAME: &str = "agent-deck-drafter";
+
+/// 下書き役に渡す Instructions。このアプリの前提(docs/architecture.md §8.1/§8.2)を
+/// ここで埋め込む — 外すと「LLM に直接集計させる」定義が生成され、もっともらしい
+/// 誤った数字を出す作りになる。
+const DRAFTER_INSTRUCTIONS: &str = r#"あなたは agent-deck(定型業務を AI エージェントに依頼する業務アプリ)の
+エージェント定義を作る担当です。利用者の説明から、定義の下書きを JSON で 1 つだけ返します。
+
+## 前提
+あなたはツールを一切使えません(ファイルもフォルダも見られない)。実物を確認したくなっても
+利用者に聞き返さず、説明から妥当な下書きを作ること。前提が確定できない点は、
+body の中に「利用者に確認する」手順として書けばよい。
+
+## 出力形式
+次のキーだけを持つ JSON オブジェクトを出力すること。前置きも説明も書かない。
+{
+  "name": "エージェント名(日本語可・20文字以内)",
+  "description": "何をするエージェントかの一文。Copilot が委任先を選ぶ判断にも使われる",
+  "tools": ["read", "execute"],
+  "body": "Instructions 本文(Markdown)"
+}
+
+## tools
+次の名前だけを使い、**その業務に必要なものだけ**を挙げること。
+execute(コマンド実行) / read(ファイル読み取り) / edit(ファイル作成・編集) /
+search(ファイル・テキスト検索) / agent(他エージェントへの委任) / web(Web 取得・検索) / todo(タスクリスト)
+これ以外の名前や "*"(全ツール)は書かない。
+
+## body に必ず含める方針(このアプリの前提)
+- **数値の集計を自分で計算しない。** 集計スクリプト(Python 等)を書いて実行し、その出力を根拠に文章を書く
+- 書いた集計スクリプトは成果物と一緒に出力フォルダへ保存する
+- 成果物のファイルはファイル書き込みツール(write)で出力フォルダに保存する。
+  シェルのリダイレクトや Set-Content で書かない(シェル経由の書き込みは自動承認されず、
+  成果物一覧にも載らない)
+- 成果物の末尾に、使用したエージェント定義名とモデル名を記録する
+- 入力データの前提(文字コード・列名・期間など)が想定と違ったら、勝手に補わず利用者に質問する
+
+## 書き方
+- 日本語で書く。利用者はエンジニアとは限らない
+- 手順は業務の流れ(入力の確認 → 集計 → レポート作成 → 保存)に沿った箇条書きにする"#;
+
+/// 下書き生成の待ち時間。1 往復のテキスト生成なので、タスク実行(30分)より短く切る。
+const DRAFT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// エージェント定義の下書きを Copilot に書かせる(docs/roadmap.md v1.1 (b))。
+///
+/// run_task は通さない: ここで必要なのは「1 往復のテキスト」だけで、イベント配信・
+/// 権限ブリッジ・履歴・中断のどの経路も使わないため、ダミー値を詰めて重い経路を通すより
+/// SDK を直接呼ぶ方が短い。ツールは `tools: []`(全禁止。docs/sdk-notes.md「ツール制限」節)で
+/// 封じてあり、このセッションはファイルにも外部にも一切触れない。
+pub async fn draft_agent(
+    cli_path: PathBuf,
+    session_model: Option<String>,
+    working_directory: PathBuf,
+    request: String,
+) -> Result<DraftedAgent, String> {
+    let client = Client::start(ClientOptions::new().with_program(CliProgram::Path(cli_path)))
+        .await
+        .map_err(|e| with_hint(&format!("Copilot CLI を起動できません: {e}")))?;
+
+    let drafter = CustomAgentConfig::new(DRAFTER_AGENT_NAME.to_string(), DRAFTER_INSTRUCTIONS.to_string())
+        .with_description("agent-deck のエージェント定義の下書きを作る".to_string())
+        .with_tools(Vec::<String>::new());
+    let mut config = SessionConfig::default()
+        .with_custom_agents(vec![drafter])
+        .with_agent(DRAFTER_AGENT_NAME.to_string())
+        .with_working_directory(working_directory);
+    if let Some(model) = session_model {
+        config = config.with_model(model);
+    }
+
+    let session = match client.create_session(config).await {
+        Ok(s) => s,
+        Err(e) => {
+            if let Err(stop_err) = client.stop().await {
+                eprintln!("Client の停止に失敗しました: {stop_err}");
+            }
+            return Err(with_hint(&format!("セッションを作成できません: {e}")));
+        }
+    };
+
+    let mut events = session.subscribe();
+    let send_fut = session.send_and_wait(MessageOptions::new(request).with_wait_timeout(DRAFT_TIMEOUT));
+    tokio::pin!(send_fut);
+    let mut last_message = String::new();
+
+    let send_result = loop {
+        tokio::select! {
+            send_result = &mut send_fut => {
+                // send_and_wait 解決直後のブロードキャストを取りこぼさない(DRAIN_TIMEOUT のコメント参照)。
+                while let Ok(Ok(ev)) = tokio::time::timeout(DRAIN_TIMEOUT, events.recv()).await {
+                    collect_main_message(&ev, &mut last_message);
+                }
+                break send_result;
+            }
+            ev = events.recv() => {
+                if let Ok(ev) = ev {
+                    collect_main_message(&ev, &mut last_message);
+                }
+            }
+        }
+    };
+
+    if let Err(e) = session.disconnect().await {
+        eprintln!("セッション切断に失敗しました: {e}");
+    }
+    if let Err(e) = client.stop().await {
+        eprintln!("Client の停止に失敗しました: {e}");
+    }
+    send_result.map_err(|e| with_hint(&format!("下書きの生成に失敗しました: {e}")))?;
+
+    parse_drafted_agent(&last_message)
+}
+
+/// メインエージェント(agent_id なし)の確定本文だけを拾う。EventContext と同じ理由で
+/// ストリーミング delta は見ない(docs/sdk-notes.md)。
+fn collect_main_message(ev: &SessionEvent, last: &mut String) {
+    if ev.event_type == "assistant.message" && ev.agent_id.is_none() {
+        if let Some(data) = ev.typed_data::<AssistantMessageData>() {
+            *last = data.content;
+        }
+    }
+}
+
+/// 応答テキストから下書きを取り出す。モデルはコードフェンスや前置きを付けてくることが
+/// あるため、最初の `{` から最後の `}` までを切り出してパースする。
+/// tools は KNOWN_AGENT_TOOLS で濾し、残らなければ None(= 全ツール、エディタの既定)にする。
+pub fn parse_drafted_agent(text: &str) -> Result<DraftedAgent, String> {
+    let start = text.find('{');
+    let end = text.rfind('}');
+    let json = match (start, end) {
+        (Some(s), Some(e)) if s < e => &text[s..=e],
+        // エラーは握りつぶさず、モデルが何を返したかを UI に見せる(先頭のみ)。
+        // 実機で最も多い失敗は「ファイルを見せてほしい」と聞き返される形(下書き役は
+        // ツールを持たないため実物を確認できない)なので、対処法を添える。
+        _ => {
+            return Err(format!(
+                "下書きの JSON が見つかりませんでした。やりたいことの説明だけで依頼してください\
+                 (下書き役はファイルやフォルダを見られません)。応答: {}",
+                preview(text)
+            ))
+        }
+    };
+    let mut drafted: DraftedAgent = serde_json::from_str(json)
+        .map_err(|e| format!("下書きの JSON を読めませんでした({e})。応答: {}", preview(text)))?;
+    drafted.tools = drafted
+        .tools
+        .map(|tools| tools.into_iter().filter(|t| KNOWN_AGENT_TOOLS.contains(&t.as_str())).collect::<Vec<_>>())
+        .filter(|tools: &Vec<String>| !tools.is_empty());
+    Ok(drafted)
+}
+
+/// エラー文に載せる応答の抜粋(全文だとダイアログが読めなくなる)。
+fn preview(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return "(空)".to_string();
+    }
+    let head: String = trimmed.chars().take(200).collect();
+    if head.chars().count() < trimmed.chars().count() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
 /// std に無い RFC3339 風フォーマット(秒精度)。新規クレート追加禁止(chrono 等不可)のため自前実装。
 /// Howard Hinnant の civil_from_days アルゴリズム(グレゴリオ暦、UTC 前提)。
 /// pub(crate): sync.rs のマニフェスト syncedAt にも再利用する(同じ日時算出ロジックを二重実装しない)。
@@ -1310,6 +1498,36 @@ mod tests {
     #[test]
     fn build_message_text_without_dirs_returns_prompt_as_is() {
         assert_eq!(build_message_text("集計して", None, None), "集計して");
+    }
+
+    /// 下書きはコードフェンスや前置き付きで返ってくることがある。
+    /// tools は既知7種で濾し、`*` や MCP 形式など広がる指定は落とす(v1.1 の論点)。
+    #[test]
+    fn parse_drafted_agent_strips_fence_and_filters_unknown_tools() {
+        let text = "了解しました。\n```json\n{\
+            \"name\": \"集計くん\", \"description\": \"アンケートを集計する\",\
+            \"tools\": [\"read\", \"*\", \"execute\", \"github/create_issue\"],\
+            \"body\": \"# 役割\\n数字はスクリプトで出す\"}\n```\n以上です。";
+        let drafted = parse_drafted_agent(text).unwrap();
+        assert_eq!(drafted.name, "集計くん");
+        assert_eq!(drafted.tools, Some(vec!["read".to_string(), "execute".to_string()]));
+        assert_eq!(drafted.body, "# 役割\n数字はスクリプトで出す");
+    }
+
+    /// 既知ツールが1つも残らなければ None(= 全ツール、エディタの既定)に倒す。
+    #[test]
+    fn parse_drafted_agent_maps_empty_tools_to_none() {
+        let text = r#"{"name":"a","description":"b","tools":["*"],"body":"c"}"#;
+        assert_eq!(parse_drafted_agent(text).unwrap().tools, None);
+    }
+
+    /// JSON が無い/壊れている場合は握りつぶさず、モデルの応答を添えて失敗させる。
+    #[test]
+    fn parse_drafted_agent_reports_non_json_response() {
+        let err = parse_drafted_agent("すみません、作れませんでした").unwrap_err();
+        assert!(err.contains("すみません"), "応答の抜粋がエラーに載る: {err}");
+        let err = parse_drafted_agent(r#"{"name": "a"}"#).unwrap_err();
+        assert!(err.contains("読めませんでした"), "必須キー欠落は読めないエラー: {err}");
     }
 
     #[test]

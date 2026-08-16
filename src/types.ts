@@ -29,6 +29,15 @@ export interface AgentDefinitionDto {
   sourcePath: string;
 }
 
+// src-tauri/src/copilot.rs DraftedAgent(draft_agent_definition の戻り値。docs/roadmap.md v1.1)
+// model は含まない(古いモデル名を書かれるのを避けるため生成させない)。
+export interface DraftedAgent {
+  name: string;
+  description: string;
+  tools: string[] | null;
+  body: string;
+}
+
 // src-tauri/src/sync.rs SyncSummary(sync_shared_agents_cmd の戻り値)
 export interface SyncSummary {
   added: number;

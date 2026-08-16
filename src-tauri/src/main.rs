@@ -253,6 +253,30 @@ fn create_agent_definition(
 
 /// 共有定義を同じ id で個人スコープへコピーする(「複製して編集」。決定ログ 2026-08-12)。
 /// 個人優先の dedup により、以後は複製したファイルが実行・編集対象になる。
+/// エージェント定義の下書きを Copilot に作らせる(docs/roadmap.md v1.1 (b))。
+/// 返すのはテキストだけで、ファイルに書くのは利用者が「保存」を押したとき
+/// (save_agent_definition)。生成セッションはツールを持たない(copilot::draft_agent)。
+#[tauri::command]
+async fn draft_agent_definition(app: tauri::AppHandle, request: String) -> Result<copilot::DraftedAgent, String> {
+    if request.trim().is_empty() {
+        return Err("どんなエージェントを作りたいかを入力してください".to_string());
+    }
+    // State のガード(!Send)を await に跨がせないよう、必要な値をここで取り切る。
+    let (cli_path, model, workdir) = {
+        let state = app.state::<AppState>();
+        let data_dir = state.data_dir()?.clone();
+        let cfg = config::load_app_config(&data_dir)?;
+        let cli_path = copilot::resolve_cli_path(cfg.copilot_cli_path.as_deref())?;
+        // 下書き生成はファイルに触らないが、SDK に渡す作業フォルダはアプリ管理下に限定する
+        // (docs/architecture.md §7.2)。
+        let workdir = data_dir.join("workspace");
+        std::fs::create_dir_all(&workdir)
+            .map_err(|e| format!("ワークスペースフォルダを作成できません({}): {e}", workdir.display()))?;
+        (cli_path, cfg.default_model.clone(), workdir)
+    };
+    copilot::draft_agent(cli_path, model, workdir, request).await
+}
+
 #[tauri::command]
 fn duplicate_agent(state: State<AppState>, agent_id: String) -> Result<(), String> {
     let data_dir = state.data_dir()?;
@@ -963,6 +987,7 @@ fn main() {
             get_agent_definition,
             save_agent_definition,
             create_agent_definition,
+            draft_agent_definition,
             duplicate_agent,
             rename_agent_definition,
             delete_agent_definition,

@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { AgentDefinitionDto, AgentSettings } from "./types";
+import type { AgentDefinitionDto, AgentSettings, DraftedAgent } from "./types";
 import {
   AGENT_TOOL_OPTIONS,
   PERMISSION_TOOL_OPTIONS,
@@ -131,6 +131,12 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
   const [form, setForm] = useState<ConfigFormState>(EMPTY_FORM);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
 
+  // 定義の下書きを Copilot に書かせる(docs/roadmap.md v1.1)。生成結果はフォームに
+  // 流し込むだけで、ファイルに書くのは利用者が「保存」を押したとき。
+  const [draftRequest, setDraftRequest] = useState("");
+  const [drafting, setDrafting] = useState(false);
+  const [draftStatus, setDraftStatus] = useState<string | null>(null);
+
   function loadDefinition(d: AgentDefinitionDto) {
     setDefinition(d);
     setDefForm({
@@ -212,6 +218,32 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
     }
   }
 
+  async function handleDraft() {
+    const request = draftRequest.trim();
+    if (!request) return;
+    // 生成は name/description/tools/body をまとめて置き換える。書きかけがあれば確認する
+    // (保存前なのでファイルは無事だが、編集中の文章が消えるのは驚きになる)。
+    const hasEdits = Boolean(defForm.name || defForm.description || defForm.body);
+    if (hasEdits && !window.confirm("名前・説明・ツール・本文を下書きで置き換えます。よろしいですか?")) return;
+    setDrafting(true);
+    setDraftStatus(null);
+    try {
+      const drafted = await invoke<DraftedAgent>("draft_agent_definition", { request });
+      setDefForm((f) => ({
+        ...f,
+        name: drafted.name,
+        description: drafted.description,
+        tools: decomposeAgentTools(drafted.tools),
+        body: drafted.body,
+      }));
+      setDraftStatus("✅ 下書きを反映しました。内容を確認して「保存」を押してください");
+    } catch (e) {
+      setDraftStatus(`⚠ 下書きの生成に失敗しました: ${e}`);
+    } finally {
+      setDrafting(false);
+    }
+  }
+
   async function handleDeleteDefinition() {
     if (!window.confirm(`エージェント定義「${id}」を削除しますか?`)) return;
     try {
@@ -258,6 +290,27 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
             </>
           ) : (
             <>
+              <label>
+                Copilot に下書きしてもらう(やりたいことを日本語で)
+                <textarea
+                  className="prompt-input"
+                  rows={3}
+                  value={draftRequest}
+                  disabled={drafting}
+                  placeholder="例: 部署別のアンケート結果 CSV を集計して、傾向をまとめたレポートを作りたい"
+                  onChange={(e) => setDraftRequest(e.target.value)}
+                />
+              </label>
+              <p className="muted hint">
+                下書きが下の各欄に入るだけです。「保存」を押すまでファイルには書き込まれません。
+                ツールは必要なものだけに絞られるので、足りなければ自分で追加してください。
+              </p>
+              <div className="run-controls">
+                <button type="button" onClick={handleDraft} disabled={drafting || !draftRequest.trim()}>
+                  {drafting ? "生成中..." : "下書きしてもらう"}
+                </button>
+              </div>
+              {draftStatus && <p className="muted">{draftStatus}</p>}
               <label>
                 ID(定義ファイル名。保存時に変更されます)
                 <input

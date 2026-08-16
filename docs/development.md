@@ -70,8 +70,11 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin smoke
   ツール指定の複数選択 UI、定義・入出力設定の別ウインドウ化、エージェント ID のリネーム、
   出力フォルダのパスをモデルへ伝達、HUD テーマとアバター表示。
   実機検証は `cargo run --bin step10_check`(ask_user 往復・resume の文脈継承)
-- **v1.0 の次**: [roadmap.md](roadmap.md) の v1.1(依頼を書かせない)以降。
-  着手前にスコープをユーザーと確認し、requirements.md に昇格させてから実装に入る
+- [~] v1.1 文章を書かせない — **(b) 定義の下書き生成は実装済み**(`copilot::draft_agent` +
+  定義エディタの「下書きしてもらう」)。実機検証は `cargo run --bin step11_check`
+  (ラウンドA: 説明から下書き生成、ラウンドB: ツール封じの確認)。
+  **(a) 依頼フォームは未着手**(フォーム定義は `.agent.md` frontmatter に置くと決定 —
+  [open-questions.md](open-questions.md) #9。着手時はまず `render_agent_md` を直す)
 
 ### v0.1 ステップ進捗
 
