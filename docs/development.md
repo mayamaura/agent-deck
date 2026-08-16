@@ -65,6 +65,13 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin smoke
   3. 主要エラーの自己説明性 — 実装済み(認証・ポリシー・CLI パス・クレジット・タイムアウトにヒント付与)
   4. 利用者ガイド — [user-guide.md](user-guide.md) 作成済み
   条件 1・2 が確認できたら v1.0.0 の正式タグを打つこと
+- rc1 以降の追加(実運用フィードバック由来。要求仕様は [requirements.md](requirements.md) §2.2 に反映済み):
+  質問への回答(`ask_user`)、継続依頼の会話保持とレジューム、承認の 3 択化、
+  ツール指定の複数選択 UI、定義・入出力設定の別ウインドウ化、エージェント ID のリネーム、
+  出力フォルダのパスをモデルへ伝達、HUD テーマとアバター表示。
+  実機検証は `cargo run --bin step10_check`(ask_user 往復・resume の文脈継承)
+- **v1.0 の次**: [roadmap.md](roadmap.md) の v1.1(依頼を書かせない)以降。
+  着手前にスコープをユーザーと確認し、requirements.md に昇格させてから実装に入る
 
 ### v0.1 ステップ進捗
 
@@ -112,11 +119,15 @@ requirements.md §4 の 10 項目の検証状況:
 
 GUI 上での通し操作(実際の業務データでのレポート生成)はユーザーの実運用確認待ち。
 
-### 既知の設計上の限界(v0.1)
+### 既知の設計上の限界
 
 - モデルが write ツールでなくシェル(Set-Content 等)でファイルを書いた場合、
   自動承認の対象外(Ask に倒れる=安全側)であり、output_files にも載らない。
   対策はエージェント定義の Instructions で write ツール使用を指示すること(agents/ のサンプル参照)
+- **`.agent.md` の未知 frontmatter キーは定義エディタでの保存時に失われる。**
+  `main.rs` の `render_agent_md` が name/description/model/tools のみを書き出すため、
+  `mcp-servers` などを手書きしても消える。roadmap v1.1/v1.3 の前提になるので、
+  そちらに着手する際は最初にここを直す
 
 ### 検証の習慣
 
