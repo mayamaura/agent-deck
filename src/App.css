@@ -264,6 +264,14 @@ body::before {
   vertical-align: middle;
 }
 
+/* ラベル横の「?」。ホバーでネイティブのツールチップに説明が出る。 */
+.badge.help {
+  cursor: help;
+  color: var(--accent);
+  background: rgba(77, 227, 255, 0.1);
+  border-color: rgba(77, 227, 255, 0.32);
+}
+
 .badge.scope-shared {
   color: var(--accent);
   background: rgba(77, 227, 255, 0.1);

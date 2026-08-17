@@ -918,6 +918,18 @@ export default function App() {
           <h3>共有設定</h3>
           <label>
             共有元フォルダ
+            <span
+              className="badge help"
+              title={
+                "チーム共有のエージェント定義(*.agent.md)を置いてあるフォルダ。\n" +
+                "ネットワーク共有や OneDrive など、全員が読める場所を指定します。\n\n" +
+                "「同期」を押すと直下の *.agent.md がこの PC にコピーされ、一覧に「🌐 共有」として並びます。\n" +
+                "同期は全置換です。共有元から消えた定義はこの PC からも消えます。\n" +
+                "同じ ID の個人定義があるときは個人側が優先され、共有側は「個人版あり」と表示されます。"
+              }
+            >
+              ?
+            </span>
             <div className="folder-row">
               <input
                 type="text"
@@ -949,6 +961,18 @@ export default function App() {
           <h3>更新配布フォルダ</h3>
           <label>
             配布フォルダ(manifest.json を置く場所)
+            <span
+              className="badge help"
+              title={
+                "agent-deck 本体の新しいインストーラを置いてあるフォルダ。\n" +
+                "ネットワーク共有など、配布担当者が更新版を置ける場所を指定します。\n\n" +
+                "直下の manifest.json(version / file / sha256 / notes)を読み、\n" +
+                "今使っているバージョンより新しければ画面上部で通知します。\n" +
+                "更新の適用は自動ではありません。通知から配布フォルダを開き、インストーラを手動で実行してください。"
+              }
+            >
+              ?
+            </span>
             <div className="folder-row">
               <input
                 type="text"
