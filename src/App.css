@@ -718,6 +718,11 @@ tbody tr:hover {
   font-size: 11px;
 }
 
+/* 起動待ちチップ(taskStarted 受信前)。ボタンではないのでクリック可能に見せない。 */
+.dashboard-chip.starting {
+  cursor: default;
+}
+
 .dashboard-chip.active {
   border-color: var(--accent);
   background: rgba(77, 227, 255, 0.14);

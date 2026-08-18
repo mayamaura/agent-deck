@@ -653,6 +653,9 @@ fn spawn_task_inner(
 
     // 履歴書き込み用に、TaskSpec へ move する前に複製しておく(docs/development.md ステップ6)。
     let prompt_for_history = prompt.clone();
+    // TaskStarted 前の起動失敗を UI に通知する際のセッション ID(下の Err アーム参照)。
+    // resume なら元セッションへ失敗ターンとして届き、新規なら run_id の擬似セッションになる。
+    let session_id_for_err = resume_session_id.clone();
     let spec = copilot::TaskSpec {
         prompt,
         agent_id: agent_id.clone(),
@@ -783,8 +786,30 @@ fn spawn_task_inner(
                 notify_task_result(&app_handle, &agent_id, &outcome);
             }
             // TaskStarted 前(セッション起動失敗等)の失敗。履歴の主キーである session_id が
-            // 無いため履歴対象外(copilot::run_task のコメント参照)。
-            Err(e) => eprintln!("タスクの実行に失敗しました: {e}"),
+            // 無いため履歴対象外(copilot::run_task のコメント参照)だが、UI に理由を出すため
+            // 擬似セッションとして TaskStarted + TaskFailed を emit する(エラーを握りつぶさない。
+            // フロントはこれで「起動中…」表示も解除する)。
+            Err(e) => {
+                eprintln!("タスクの実行に失敗しました: {e}");
+                let sid = session_id_for_err.unwrap_or_else(|| run_id_for_task.clone());
+                let evs = [
+                    events::AppEvent::TaskStarted {
+                        session_id: sid.clone(),
+                        agent_id: agent_id.clone(),
+                        started_at: copilot::format_rfc3339_now(),
+                        prompt: prompt_for_history.clone(),
+                    },
+                    events::AppEvent::TaskFailed {
+                        session_id: sid,
+                        error: format!("タスクを開始できませんでした: {e}"),
+                    },
+                ];
+                for ev in evs {
+                    if let Err(e) = app_handle.emit(events::EVENT_CHANNEL, &ev) {
+                        eprintln!("イベント送信に失敗しました: {e}");
+                    }
+                }
+            }
         }
 
         if let Some(state) = app_handle.try_state::<AppState>() {

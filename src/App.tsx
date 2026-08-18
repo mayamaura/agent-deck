@@ -27,6 +27,14 @@ const MAX_RECENT_FINISHED_SESSIONS = 5;
 
 const NO_RESPONSES = new Set<string>();
 
+/** Record から 1 キーを除いた新しい Record を返す(無ければそのまま)。 */
+function removeKey<T>(rec: Record<string, T>, key: string): Record<string, T> {
+  if (!(key in rec)) return rec;
+  const next = { ...rec };
+  delete next[key];
+  return next;
+}
+
 // 3 ペイン構成の骨格(docs/requirements.md §3.1)。
 // 実行ビューはツリー表示(docs/requirements.md §3.3。このアプリの主目的)。
 // 生イベントの時系列ログ・トークン使用量・出力ファイルは詳細ペインへ移設。
@@ -388,6 +396,9 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
 
   const [prompt, setPrompt] = useState("");
+  // 実行要求から taskStarted 受信まで(SDK セッション作成に数秒かかる)の「起動中」表示。
+  // キーは agentId、値は要求時刻(タイムアウト保険の突き合わせ用)。二重実行の防止も兼ねる。
+  const [startingAgents, setStartingAgents] = useState<Record<string, number>>({});
   // セッション別のイベント束(docs/roadmap.md v0.5: 並行実行)。キーは sessionId。
   const [sessions, setSessions] = useState<Record<string, SessionState>>({});
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -422,6 +433,9 @@ export default function App() {
   // タスク完了後の追い返信(v1.0 経路B)。タブを切り替えたら前のタブの下書きは持ち越さない。
   const [replyMessage, setReplyMessage] = useState("");
   const [replyError, setReplyError] = useState<string | null>(null);
+  // 送信済みの追い返信。taskStarted 受信までの間、チャットに送信済み吹き出し+入力中ドットを
+  // 出す(LINE 同様、送信即時に自分の発言が見える)。キーは sessionId。
+  const [pendingReplies, setPendingReplies] = useState<Record<string, { at: number; message: string }>>({});
 
   const [outputFolderError, setOutputFolderError] = useState<string | null>(null);
   // 監査ログフォルダを開くボタンのエラー表示用(docs/roadmap.md v0.6)。
@@ -558,6 +572,9 @@ export default function App() {
       if (ev.kind === "taskStarted") {
         setActiveSessionId(sid);
         setNowTick(Date.now());
+        // 「起動中…」表示と送信済み返信の仮表示を解除する(実イベントに置き換わるため)。
+        setStartingAgents((prev) => removeKey(prev, ev.agentId));
+        setPendingReplies((prev) => removeKey(prev, sid));
         // スケジュール実行がキューから1件消費されたはずなので待機件数を更新する。
         reloadQueueStatus();
       } else if (ev.kind === "taskCompleted" || ev.kind === "taskFailed" || ev.kind === "taskCancelled") {
@@ -601,13 +618,15 @@ export default function App() {
   }, [anyRunning]);
 
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
+  const startingSelected = selected != null && startingAgents[selected] != null;
+  const pendingReply = activeSessionId ? pendingReplies[activeSessionId] : undefined;
 
-  // タブ切り替え・イベント追加のたびにチャット末尾へ。nowTick では発火させない
+  // タブ切り替え・イベント追加・返信送信のたびにチャット末尾へ。nowTick では発火させない
   // (1秒毎のスクロールはユーザーの読み返しを妨げる)。
   const activeEventCount = activeSession?.events.length ?? 0;
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ block: "nearest" });
-  }, [activeSessionId, activeEventCount]);
+  }, [activeSessionId, activeEventCount, pendingReply?.at]);
 
   const tree: TreeState = buildTree(
     activeSession ? activeSession.events.map((e) => e.event) : [],
@@ -621,12 +640,22 @@ export default function App() {
   async function handleRun() {
     // docs/roadmap.md v0.5: 実行中でも他エージェントの実行ボタンは有効(並行実行)。
     // 同一エージェントの二重実行は outputDir 制限があればバックエンドがエラーを返す。
-    if (!selected || !prompt.trim()) return;
+    // startingAgents ガードは Ctrl+Enter 連打対策(ボタンの disabled だけでは防げない)。
+    if (!selected || !prompt.trim() || startingAgents[selected] != null) return;
     setRunError(null);
+    const agentId = selected;
+    const at = Date.now();
+    setStartingAgents((prev) => ({ ...prev, [agentId]: at }));
+    // 保険: taskStarted も TaskFailed も届かないまま(バックエンドがイベントを出せずに
+    // 死んだ場合)ボタンが永久に無効化されるのを防ぐ。
+    setTimeout(() => {
+      setStartingAgents((prev) => (prev[agentId] === at ? removeKey(prev, agentId) : prev));
+    }, 60_000);
     try {
-      await invoke("start_task", { agentId: selected, prompt });
+      await invoke("start_task", { agentId, prompt });
     } catch (e) {
       setRunError(String(e));
+      setStartingAgents((prev) => removeKey(prev, agentId));
     }
   }
 
@@ -885,14 +914,25 @@ export default function App() {
 
   /** タスク完了後の追い返信(v1.0 経路B)。同じ session_id を resume して続きを実行する。 */
   async function handleReply() {
-    if (!activeSessionId || !replyMessage.trim()) return;
+    if (!activeSessionId || !replyMessage.trim() || pendingReplies[activeSessionId]) return;
     setReplyError(null);
+    const sessionId = activeSessionId;
+    const message = replyMessage;
+    const at = Date.now();
+    // LINE 同様、送信した時点で入力欄を空にし、チャットに送信済み表示を出す。
+    setPendingReplies((prev) => ({ ...prev, [sessionId]: { at, message } }));
+    setReplyMessage("");
+    // 保険: handleRun と同じ(イベントが届かないまま送信済み表示が残り続けるのを防ぐ)。
+    setTimeout(() => {
+      setPendingReplies((prev) => (prev[sessionId]?.at === at ? removeKey(prev, sessionId) : prev));
+    }, 60_000);
     const agentId = activeSession?.agentId ?? "";
     try {
-      await invoke("reply_task", { sessionId: activeSessionId, agentId, message: replyMessage });
-      setReplyMessage("");
+      await invoke("reply_task", { sessionId, agentId, message });
     } catch (e) {
       setReplyError(String(e));
+      setReplyMessage(message); // 失敗したら下書きへ戻す(入力を失わせない)
+      setPendingReplies((prev) => removeKey(prev, sessionId));
     }
   }
 
@@ -1202,7 +1242,18 @@ export default function App() {
         {/* ダッシュボード帯(docs/roadmap.md v0.5): 実行中セッションのチップ・待機キュー・直近の失敗。 */}
         <div className="dashboard-bar">
           <div className="dashboard-chips">
-            {runningSessionIds.length === 0 && <span className="muted">実行中のセッションはありません</span>}
+            {runningSessionIds.length === 0 && Object.keys(startingAgents).length === 0 && (
+              <span className="muted">実行中のセッションはありません</span>
+            )}
+            {/* taskStarted 受信前の起動待ち。セッションがまだ無いためタブは出せないが、
+                「押した操作が進んでいる」ことをここで見せる。 */}
+            {Object.keys(startingAgents).map((aid) => (
+              <span key={`starting-${aid}`} className="dashboard-chip starting">
+                <Avatar name={aid} status="running" />
+                <strong>{aid}</strong>
+                <span className="muted">起動中…</span>
+              </span>
+            ))}
             {runningSessionIds.map((sid) => {
               const s = sessions[sid];
               const t = buildTree(s.events.map((e) => e.event), s.respondedRequestIds);
@@ -1249,9 +1300,12 @@ export default function App() {
               rows={3}
             />
             <div className="run-controls">
-              <button className="primary" onClick={handleRun} disabled={!prompt.trim()}>
-                ▶ 実行
+              <button className="primary" onClick={handleRun} disabled={!prompt.trim() || startingSelected}>
+                {startingSelected ? "⏳ 起動中…" : "▶ 実行"}
               </button>
+              {startingSelected && (
+                <span className="muted">エージェントを起動しています(数秒かかります)</span>
+              )}
             </div>
             {runError && <p className="error">⚠ {runError}</p>}
           </>
@@ -1322,6 +1376,23 @@ export default function App() {
                 <p>✅ {tree.summary}</p>
               </AgentMessage>
             )}
+            {/* 送信済みの追い返信(taskStarted 受信までの仮表示)。実イベントが届いたら
+                本物のターン表示に置き換わる。 */}
+            {pendingReply && (
+              <>
+                <UserBubble
+                  text={pendingReply.message}
+                  time={bubbleTime(new Date(pendingReply.at).toISOString())}
+                />
+                <AgentMessage name={activeSession.agentId || "?"} status="running" meta="起動中">
+                  <span className="typing" role="status" aria-label="起動中">
+                    <i />
+                    <i />
+                    <i />
+                  </span>
+                </AgentMessage>
+              </>
+            )}
             <div ref={chatEndRef} />
             {tree.taskStatus === "running" && (
               <div className="chat-input-bar">
@@ -1345,7 +1416,12 @@ export default function App() {
                     }}
                     placeholder="メッセージを入力(Ctrl+Enter で送信)"
                   />
-                  <button type="button" className="primary" onClick={handleReply} disabled={!replyMessage.trim()}>
+                  <button
+                    type="button"
+                    className="primary"
+                    onClick={handleReply}
+                    disabled={!replyMessage.trim() || pendingReply != null}
+                  >
                     送信
                   </button>
                 </div>
