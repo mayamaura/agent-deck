@@ -20,6 +20,8 @@ import { buildTree } from "./tree";
 import type { AgentRow, TreeState } from "./tree";
 import { sessionSummary } from "./sessions";
 import { AGENTS_CHANGED } from "./AgentEditor";
+import { useContextMenu } from "./contextMenu";
+import type { MenuItem } from "./contextMenu";
 
 // 実行ビュー上部のダッシュボード帯・タブに残す「直近の完了/失敗/中断セッション」件数の上限
 // (docs/roadmap.md v0.5: 実行中+直近数件のセッション)。実行中セッションは件数に含めない。
@@ -437,6 +439,9 @@ export default function App() {
   // 出す(LINE 同様、送信即時に自分の発言が見える)。キーは sessionId。
   const [pendingReplies, setPendingReplies] = useState<Record<string, { at: number; message: string }>>({});
 
+  // 実行履歴ペインの右クリックメニュー操作(コピー・フォルダを開く)のエラー表示用。
+  const [historyError, setHistoryError] = useState<string | null>(null);
+
   const [outputFolderError, setOutputFolderError] = useState<string | null>(null);
   // 監査ログフォルダを開くボタンのエラー表示用(docs/roadmap.md v0.6)。
   const [logsFolderError, setLogsFolderError] = useState<string | null>(null);
@@ -444,6 +449,9 @@ export default function App() {
   const [nowTick, setNowTick] = useState(() => Date.now());
   // チャット表示の末尾アンカー。新着メッセージで最下部へスクロールする(LINE 風)。
   const chatEndRef = useRef<HTMLDivElement | null>(null);
+
+  // 右クリックメニュー(docs/requirements.md §3.6)。全ペイン共通で1インスタンス。
+  const { menu, openMenu } = useContextMenu();
 
   async function reloadAgents() {
     try {
@@ -637,13 +645,13 @@ export default function App() {
   );
   const latestFailure = history.find((h) => h.status === "failed") ?? null;
 
-  async function handleRun() {
-    // docs/roadmap.md v0.5: 実行中でも他エージェントの実行ボタンは有効(並行実行)。
-    // 同一エージェントの二重実行は outputDir 制限があればバックエンドがエラーを返す。
-    // startingAgents ガードは Ctrl+Enter 連打対策(ボタンの disabled だけでは防げない)。
-    if (!selected || !prompt.trim() || startingAgents[selected] != null) return;
+  /** タスクを起動する(実行ボタンとスケジュール行の「今すぐ実行」で共用)。
+   * docs/roadmap.md v0.5: 実行中でも他エージェントの実行は有効(並行実行)。
+   * 同一エージェントの二重実行は outputDir 制限があればバックエンドがエラーを返す。
+   * startingAgents ガードは Ctrl+Enter 連打対策(ボタンの disabled だけでは防げない)。 */
+  async function startTask(agentId: string, promptText: string) {
+    if (!promptText.trim() || startingAgents[agentId] != null) return;
     setRunError(null);
-    const agentId = selected;
     const at = Date.now();
     setStartingAgents((prev) => ({ ...prev, [agentId]: at }));
     // 保険: taskStarted も TaskFailed も届かないまま(バックエンドがイベントを出せずに
@@ -652,21 +660,29 @@ export default function App() {
       setStartingAgents((prev) => (prev[agentId] === at ? removeKey(prev, agentId) : prev));
     }, 60_000);
     try {
-      await invoke("start_task", { agentId, prompt });
+      await invoke("start_task", { agentId, prompt: promptText });
     } catch (e) {
       setRunError(String(e));
       setStartingAgents((prev) => removeKey(prev, agentId));
     }
   }
 
-  /** 選択中タブ(activeSessionId)のセッションを中断する。 */
-  async function handleCancel() {
-    if (!activeSessionId) return;
+  async function handleRun() {
+    if (selected) await startTask(selected, prompt);
+  }
+
+  /** セッションを中断する(実行ビューの中断ボタンとタブ/チップの右クリックで共用)。 */
+  async function cancelSession(sessionId: string) {
     try {
-      await invoke("cancel_task", { sessionId: activeSessionId });
+      await invoke("cancel_task", { sessionId });
     } catch (e) {
       setRunError(String(e));
     }
+  }
+
+  /** 終了済みセッションのタブを画面から閉じる(履歴には残る)。 */
+  function closeSession(sessionId: string) {
+    setSessions((prev) => removeKey(prev, sessionId));
   }
 
   /** 新規作成はその場で空の定義を作り、あとは設定ウインドウに任せる。 */
@@ -814,14 +830,122 @@ export default function App() {
     }
   }
 
-  async function handleOpenOutputFolder() {
-    if (!selected) return;
-    setOutputFolderError(null);
+  /** 出力フォルダを開く。呼び出し元のペインごとにエラー表示先が違うため onError で受ける。 */
+  async function handleOpenOutputFolder(agentId: string, onError: (message: string | null) => void) {
+    onError(null);
     try {
-      await invoke("open_output_folder", { agentId: selected });
+      await invoke("open_output_folder", { agentId });
     } catch (e) {
-      setOutputFolderError(String(e));
+      onError(String(e));
     }
+  }
+
+  /** テキストをクリップボードへ(右クリックメニューの「コピー」)。 */
+  function copyText(text: string, onError: (message: string | null) => void) {
+    onError(null);
+    navigator.clipboard.writeText(text).catch((e) => onError(`コピーに失敗しました: ${e}`));
+  }
+
+  /** 一覧の右クリックからの削除(個人スコープのみ。AgentEditor の削除と同じコマンド)。 */
+  async function handleDeleteAgent(agentId: string) {
+    if (!window.confirm(`エージェント定義「${agentId}」を削除しますか?`)) return;
+    setError(null);
+    try {
+      await invoke("delete_agent_definition", { agentId });
+      await reloadAgents();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  /** 一覧の右クリックからの複製(共有スコープのみ。複製後は編集可能な個人版を開く)。 */
+  async function handleDuplicateAgent(agentId: string) {
+    setError(null);
+    try {
+      await invoke("duplicate_agent", { agentId });
+      await reloadAgents();
+      await openAgentEditor(agentId, setError);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  /** スケジュールの有効/無効を切り替える(行の右クリック)。 */
+  async function handleToggleSchedule(s: Schedule) {
+    setScheduleError(null);
+    try {
+      await invoke("save_schedule", { schedule: { ...s, enabled: !s.enabled } });
+      await reloadSchedules();
+    } catch (e) {
+      setScheduleError(String(e));
+    }
+  }
+
+  // ── 右クリックメニューの項目定義(docs/requirements.md §3.6)──
+
+  function agentMenuItems(a: AgentSummary): MenuItem[] {
+    return [
+      { label: "▶ 実行対象に選択", onClick: () => setSelected(a.id) },
+      { label: "⚙ 設定を開く", onClick: () => openAgentEditor(a.id, setError) },
+      { label: "📂 出力フォルダを開く", onClick: () => handleOpenOutputFolder(a.id, setError) },
+      {
+        label: "⏰ スケジュールを追加",
+        onClick: () => {
+          setScheduleForm({ ...EMPTY_SCHEDULE_FORM, agentId: a.id });
+          setScheduleSaveStatus(null);
+        },
+      },
+      ...(a.scope === "shared" && !a.shadowed
+        ? [{ label: "📄 複製して編集", onClick: () => handleDuplicateAgent(a.id) }]
+        : []),
+      ...(a.scope === "personal"
+        ? ([
+            "separator",
+            { label: "🗑 削除", danger: true, onClick: () => handleDeleteAgent(a.id) },
+          ] satisfies MenuItem[])
+        : []),
+    ];
+  }
+
+  function sessionMenuItems(sid: string): MenuItem[] {
+    const running =
+      sessionSummary(sessions[sid].events.map((e) => e.event)).status === "running";
+    return [
+      { label: "このタブを表示", onClick: () => setActiveSessionId(sid) },
+      ...(running
+        ? [{ label: "⏹ 中断", onClick: () => cancelSession(sid) }]
+        : [{ label: "✕ タブを閉じる", onClick: () => closeSession(sid) }]),
+    ];
+  }
+
+  function historyMenuItems(h: HistoryEntry): MenuItem[] {
+    return [
+      { label: "💬 会話を開く", onClick: () => openHistorySession(h) },
+      { label: "📋 依頼文をコピー", onClick: () => copyText(h.prompt, setHistoryError) },
+      ...(h.summary
+        ? [{ label: "📋 結果をコピー", onClick: () => copyText(h.summary, setHistoryError) }]
+        : []),
+      { label: "📂 出力フォルダを開く", onClick: () => handleOpenOutputFolder(h.agentId, setHistoryError) },
+    ];
+  }
+
+  function scheduleMenuItems(s: Schedule): MenuItem[] {
+    return [
+      { label: "✎ 編集", onClick: () => handleEditSchedule(s) },
+      { label: s.enabled ? "無効にする" : "有効にする", onClick: () => handleToggleSchedule(s) },
+      { label: "▶ 今すぐ実行", onClick: () => startTask(s.agentId, s.prompt) },
+      "separator",
+      { label: "🗑 削除", danger: true, onClick: () => handleDeleteSchedule(s.id) },
+    ];
+  }
+
+  function outputFileMenuItems(file: string, agentId: string): MenuItem[] {
+    return [
+      { label: "📋 パスをコピー", onClick: () => copyText(file, setOutputFolderError) },
+      ...(agentId
+        ? [{ label: "📂 出力フォルダを開く", onClick: () => handleOpenOutputFolder(agentId, setOutputFolderError) }]
+        : []),
+    ];
   }
 
   /** 監査ログフォルダ(data/logs/)を開く(docs/roadmap.md v0.6)。エージェント非依存。 */
@@ -988,6 +1112,7 @@ export default function App() {
                   className={selected === a.id ? "selected" : ""}
                   onClick={() => setSelected(a.id)}
                   onDoubleClick={() => openAgentEditor(a.id, setError)}
+                  onContextMenu={(e) => openMenu(e, agentMenuItems(a))}
                 >
                   <Avatar name={a.name} />
                   <span className="agent-card-body">
@@ -1121,7 +1246,7 @@ export default function App() {
               </thead>
               <tbody>
                 {schedules.map((s) => (
-                  <tr key={s.id}>
+                  <tr key={s.id} onContextMenu={(e) => openMenu(e, scheduleMenuItems(s))}>
                     <td>{s.agentId}</td>
                     <td>{formatRecurrence(s.recurrence)}</td>
                     <td>{s.enabled ? "有効" : "無効"}</td>
@@ -1267,6 +1392,7 @@ export default function App() {
                   type="button"
                   className={sid === activeSessionId ? "dashboard-chip active" : "dashboard-chip"}
                   onClick={() => setActiveSessionId(sid)}
+                  onContextMenu={(e) => openMenu(e, sessionMenuItems(sid))}
                 >
                   <Avatar name={s.agentId} status="running" />
                   <strong>{s.agentId}</strong>
@@ -1307,11 +1433,13 @@ export default function App() {
                 <span className="muted">エージェントを起動しています(数秒かかります)</span>
               )}
             </div>
-            {runError && <p className="error">⚠ {runError}</p>}
           </>
         ) : (
           <p className="muted">左の一覧からエージェントを選択してください</p>
         )}
+        {/* スケジュール行の「今すぐ実行」など、エージェント未選択でも起動失敗が見えるように
+            selected の分岐の外に置く。 */}
+        {runError && <p className="error">⚠ {runError}</p>}
         {/* セッションタブ(docs/roadmap.md v0.5: 実行中+直近数件のセッション)。各タブは既存の
             buildTree でツリーを描画する(呼び出し側でセッション分割してから渡すだけ)。 */}
         {Object.keys(sessions).length > 0 && (
@@ -1324,6 +1452,7 @@ export default function App() {
                   type="button"
                   className={sid === activeSessionId ? "session-tab active" : "session-tab"}
                   onClick={() => setActiveSessionId(sid)}
+                  onContextMenu={(e) => openMenu(e, sessionMenuItems(sid))}
                 >
                   {summary.agentId} {STATUS_LABEL[summary.status]}
                 </button>
@@ -1396,7 +1525,7 @@ export default function App() {
             <div ref={chatEndRef} />
             {tree.taskStatus === "running" && (
               <div className="chat-input-bar">
-                <button type="button" onClick={handleCancel}>
+                <button type="button" onClick={() => activeSessionId && cancelSession(activeSessionId)}>
                   ⏹ 中断
                 </button>
               </div>
@@ -1447,14 +1576,19 @@ export default function App() {
             <h3>出力ファイル</h3>
             <ul>
               {tree.outputFiles.map((f) => (
-                <li key={f}>{f}</li>
+                <li
+                  key={f}
+                  onContextMenu={(e) => openMenu(e, outputFileMenuItems(f, activeSession?.agentId ?? ""))}
+                >
+                  {f}
+                </li>
               ))}
             </ul>
           </div>
         )}
         {selected && (
           <div className="run-controls">
-            <button type="button" onClick={handleOpenOutputFolder}>
+            <button type="button" onClick={() => handleOpenOutputFolder(selected, setOutputFolderError)}>
               出力フォルダを開く
             </button>
           </div>
@@ -1478,6 +1612,7 @@ export default function App() {
       </aside>
       <footer className="pane history">
         <h2>実行履歴</h2>
+        {historyError && <p className="error">⚠ {historyError}</p>}
         {history.length === 0 ? (
           <p className="muted">履歴はまだありません</p>
         ) : (
@@ -1497,7 +1632,10 @@ export default function App() {
               {history.map((h) => (
                 // 継続依頼(resume)では同じ sessionId の履歴行が実行ごとに増えるため、
                 // startedAt と組み合わせて一意にする。
-                <tr key={`${h.sessionId}:${h.startedAt}`}>
+                <tr
+                  key={`${h.sessionId}:${h.startedAt}`}
+                  onContextMenu={(e) => openMenu(e, historyMenuItems(h))}
+                >
                   <td>{h.startedAt}</td>
                   <td>{h.agentId}</td>
                   <td>{TRIGGER_LABEL[h.trigger]}</td>
@@ -1520,6 +1658,7 @@ export default function App() {
         )}
       </footer>
       </div>
+      {menu}
     </>
   );
 }

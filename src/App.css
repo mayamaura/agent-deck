@@ -757,6 +757,56 @@ tbody tr:hover {
   font-weight: 600;
 }
 
+/* ── 右クリックメニュー(docs/requirements.md §3.6)── */
+
+/* メニュー表示中の全面オーバーレイ。どこをクリックしても閉じる(ネイティブメニューと同じ)。 */
+.context-menu-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+}
+
+.context-menu {
+  position: fixed;
+  min-width: 190px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-2);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+}
+
+.context-menu button {
+  width: 100%;
+  text-align: left;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  font-size: 13px;
+}
+
+.context-menu button:hover {
+  background: rgba(77, 227, 255, 0.14);
+  box-shadow: none;
+}
+
+.context-menu button.danger {
+  color: var(--err);
+}
+
+.context-menu button.danger:hover {
+  background: rgba(255, 92, 122, 0.14);
+}
+
+.context-menu hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 4px 6px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   * {
     animation: none !important;
