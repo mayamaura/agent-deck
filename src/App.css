@@ -360,8 +360,7 @@ input[type="radio"] {
 .config-form h3,
 .definition-editor h3,
 .shared-settings h3,
-.detail h3,
-.task-summary h3 {
+.detail h3 {
   font-size: 12px;
   letter-spacing: 0.1em;
   color: var(--accent);
@@ -485,71 +484,112 @@ input[type="radio"] {
   overflow-wrap: anywhere;
 }
 
-.agent-tree {
+/* ── 実行ビューのチャット表示(LINE 風)。エージェントは左(アバター付き)、
+   ユーザーの依頼は右の吹き出し。状態は色だけでなくメタ行のテキストでも示す
+   (docs/requirements.md §3.5)。 ── */
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   margin-top: 10px;
 }
 
-.agent-row {
-  padding: 8px 0;
-  border-bottom: 1px solid rgba(120, 180, 255, 0.1);
+.chat-notice {
+  text-align: center;
+  font-size: 12px;
 }
 
-.sub-indent {
-  margin-left: 15px;
-  padding-left: 12px;
-  border-left: 1px solid rgba(77, 227, 255, 0.28);
-}
-
-.agent-row-header {
+.chat-msg {
   display: flex;
-  align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
 }
 
-.status-badge {
-  font-family: var(--mono);
+.chat-msg.agent {
+  align-items: flex-start;
+}
+
+/* サブエージェントの発言は少し下げて、メインの下で動いていることを匂わせる。 */
+.chat-msg.agent.sub {
+  margin-left: 22px;
+}
+
+.chat-msg.user {
+  justify-content: flex-end;
+  align-items: flex-end;
+}
+
+.chat-msg-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  max-width: 82%;
+}
+
+.chat-sender {
   font-size: 12px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid var(--line);
   color: var(--text-dim);
 }
 
-.status-badge.status-running {
-  background: rgba(77, 227, 255, 0.12);
-  border-color: rgba(77, 227, 255, 0.45);
-  color: var(--accent);
-}
-.status-badge.status-completed {
-  background: rgba(61, 220, 151, 0.12);
-  border-color: rgba(61, 220, 151, 0.4);
-  color: var(--ok);
-}
-.status-badge.status-failed {
-  background: rgba(255, 92, 122, 0.12);
-  border-color: rgba(255, 92, 122, 0.45);
-  color: var(--err);
-}
-.status-badge.status-cancelled {
-  color: var(--text-dim);
+.chat-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
 }
 
-/* 「現在なにをしているか」は本人の発言として吹き出しで見せる。 */
-.agent-intent {
-  margin: 6px 0 0 40px;
-  padding: 6px 10px;
-  color: var(--text);
-  font-size: 12px;
+.chat-bubble {
+  width: fit-content;
+  max-width: 100%;
+  padding: 7px 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   background: rgba(77, 227, 255, 0.07);
   border: 1px solid rgba(77, 227, 255, 0.22);
-  border-radius: 12px 12px 12px 3px;
+  border-radius: 4px 14px 14px 14px;
+}
+
+.chat-msg.user .chat-bubble {
+  max-width: 82%;
+  background: rgba(157, 123, 255, 0.16);
+  border-color: rgba(157, 123, 255, 0.3);
+  border-radius: 14px 4px 14px 14px;
+}
+
+/* 吹き出し脇の時刻・状態表示(LINE の既読/時刻の位置)。 */
+.chat-meta {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+/* 「入力中…」のドット。実行中であることはメタ行のテキストでも併記している。 */
+.typing {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px 2px;
+}
+
+.typing i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: typing-blink 1.2s ease-in-out infinite;
+}
+
+.typing i:nth-child(2) { animation-delay: 0.2s; }
+.typing i:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes typing-blink {
+  0%, 60%, 100% { opacity: 0.25; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-3px); }
 }
 
 .tool-list {
   list-style: none;
-  margin: 6px 0 0 40px;
+  margin: 6px 0 0;
   padding-left: 10px;
   border-left: 1px dashed rgba(120, 180, 255, 0.25);
   font-family: var(--mono);
@@ -557,32 +597,19 @@ input[type="radio"] {
   color: var(--text-dim);
 }
 
-.task-summary {
-  margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px solid var(--line);
+/* 画面下の返信バー(LINE の入力欄)。実行中は中断ボタンだけを置く。 */
+.chat-input-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
 }
 
-/* 継続セッションの会話表示(過去のターン: 依頼→結果) */
-.conversation-turn {
-  margin: 8px 0;
-  padding-bottom: 8px;
-  border-bottom: 1px dashed rgba(120, 180, 255, 0.18);
-}
-
-.conversation-prompt {
-  margin: 4px 0;
-  padding: 6px 10px;
-  background: rgba(157, 123, 255, 0.12);
-  border: 1px solid rgba(157, 123, 255, 0.25);
-  border-radius: 12px 12px 3px 12px;
-  white-space: pre-wrap;
-}
-
-.conversation-result {
-  margin: 6px 0 0;
-  color: var(--text-dim);
-  white-space: pre-wrap;
+.chat-input-bar textarea {
+  flex: 1;
+  min-width: 0;
+  resize: vertical;
+  padding: 8px 10px;
+  border-radius: 14px;
 }
 
 table {

@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties } from "react";
+import { Fragment, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -163,6 +163,15 @@ function formatDuration(ms: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
+/** 吹き出し横に出す時刻(LINE 風)。パースできない値なら出さない。 */
+function bubbleTime(iso: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? null
+    : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
 /**
  * 行の経過/確定時間(ミリ秒)。AppEvent には壁時計の終了時刻が無いため、
  * 実行中は rowStartedAt(App.tsx が受信時刻で記録)と nowTick(1秒毎に更新)から
@@ -240,6 +249,47 @@ function UserInputRowView({
   );
 }
 
+/** ユーザー側(右)の吹き出し。LINE 同様、時刻は吹き出しの左下に出す。 */
+function UserBubble({ text, time }: { text: string; time?: string | null }) {
+  return (
+    <div className="chat-msg user">
+      {time && <span className="chat-meta">{time}</span>}
+      <div className="chat-bubble">{text}</div>
+    </div>
+  );
+}
+
+/** エージェント側(左)の発言枠。アバター+名前+吹き出し+メタ情報(状態・時間)。 */
+function AgentMessage({
+  name,
+  status,
+  sub,
+  meta,
+  children,
+}: {
+  name: string;
+  status?: AgentRow["status"];
+  sub?: boolean;
+  meta?: string | null;
+  children: ReactNode;
+}) {
+  return (
+    <div className={sub ? "chat-msg agent sub" : "chat-msg agent"}>
+      <Avatar name={name} status={status} />
+      <div className="chat-msg-body">
+        <span className="chat-sender">
+          {name}
+          {sub && "(サブ)"}
+        </span>
+        <div className="chat-row">
+          <div className="chat-bubble">{children}</div>
+          {meta && <span className="chat-meta">{meta}</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AgentRowView({
   row,
   elapsedMs,
@@ -253,21 +303,27 @@ function AgentRowView({
   onRespond: (requestId: string, decision: PermissionDecision) => void;
   onRespondUserInput: (requestId: string, answer: string | null) => void;
 }) {
+  // 状態を色だけで表現しない(docs/requirements.md §3.5)ため、メタ情報はテキストで併記する。
+  const meta = [
+    STATUS_LABEL[row.status],
+    elapsedMs != null ? formatDuration(elapsedMs) : null,
+    row.status !== "running" && row.totalTokens != null ? `${row.totalTokens} tokens` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const bubbleEmpty =
+    !row.currentIntent && row.tools.length === 0 && !row.error && row.status !== "running";
   return (
-    <div className={isSub ? "agent-row sub" : "agent-row"}>
-      <div className="agent-row-header">
-        <Avatar name={row.label} status={row.status} />
-        <strong>
-          {row.label}
-          {isSub && " (サブ)"}
-        </strong>
-        <span className={`status-badge status-${row.status}`}>{STATUS_LABEL[row.status]}</span>
-        {elapsedMs != null && <span className="muted">{formatDuration(elapsedMs)}</span>}
-        {row.status !== "running" && row.totalTokens != null && (
-          <span className="muted">{row.totalTokens} tokens</span>
-        )}
-      </div>
-      {row.currentIntent && <p className="agent-intent">現在: {row.currentIntent}</p>}
+    <AgentMessage name={row.label} status={row.status} sub={isSub} meta={meta}>
+      {row.currentIntent && <p>{row.currentIntent}</p>}
+      {row.status === "running" && (
+        <span className="typing" role="status" aria-label="作業中">
+          <i />
+          <i />
+          <i />
+        </span>
+      )}
+      {bubbleEmpty && <p className="muted">(この実行の発言は記録されていません)</p>}
       {row.error && <p className="error">⚠ {row.error}</p>}
       {row.tools.length > 0 && (
         <ul className="tool-list">
@@ -298,7 +354,7 @@ function AgentRowView({
       {row.pendingUserInputs.map((q) => (
         <UserInputRowView key={q.requestId} q={q} onRespond={onRespondUserInput} />
       ))}
-    </div>
+    </AgentMessage>
   );
 }
 
@@ -372,6 +428,8 @@ export default function App() {
   const [logsFolderError, setLogsFolderError] = useState<string | null>(null);
   // 経過時間表示の現在時刻(1秒毎に更新。全セッション共通)。
   const [nowTick, setNowTick] = useState(() => Date.now());
+  // チャット表示の末尾アンカー。新着メッセージで最下部へスクロールする(LINE 風)。
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
 
   async function reloadAgents() {
     try {
@@ -543,6 +601,14 @@ export default function App() {
   }, [anyRunning]);
 
   const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
+
+  // タブ切り替え・イベント追加のたびにチャット末尾へ。nowTick では発火させない
+  // (1秒毎のスクロールはユーザーの読み返しを妨げる)。
+  const activeEventCount = activeSession?.events.length ?? 0;
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ block: "nearest" });
+  }, [activeSessionId, activeEventCount]);
+
   const tree: TreeState = buildTree(
     activeSession ? activeSession.events.map((e) => e.event) : [],
     activeSession ? activeSession.respondedRequestIds : NO_RESPONSES,
@@ -1212,29 +1278,26 @@ export default function App() {
           </div>
         )}
         {activeSession ? (
-          <>
-            {/* 継続セッションの会話表示: 過去のターン(依頼→結果)を古い順に並べ、
-                その下に現在の実行ツリーが続く(会話のレジューム)。 */}
+          <div className="chat">
+            {/* 継続セッションの会話表示(会話のレジューム): 過去のターン(依頼→結果)を
+                古い順にチャットとして並べ、その下に現在の実行の発言が続く。 */}
             {tree.turns.length > 0 && (
-              <p className="muted">🔗 継続した会話です({tree.turns.length + 1} 回目の依頼)</p>
+              <p className="muted chat-notice">🔗 継続した会話です({tree.turns.length + 1} 回目の依頼)</p>
             )}
             {tree.turns.map((t, i) => (
-              <div className="conversation-turn" key={i}>
-                <p className="conversation-prompt">🖐 {t.prompt ?? "(依頼内容は記録されていません)"}</p>
-                <p className="conversation-result">
-                  {t.status === "completed" ? "✅" : t.status === "failed" ? "❌" : "⏹"}{" "}
-                  {t.summary ?? "(結果なし)"}
-                </p>
-              </div>
+              <Fragment key={i}>
+                <UserBubble text={t.prompt ?? "(依頼内容は記録されていません)"} time={bubbleTime(t.startedAt)} />
+                <AgentMessage name={activeSession.agentId || "?"} meta={STATUS_LABEL[t.status]}>
+                  <p>
+                    {t.status === "completed" ? "✅" : t.status === "failed" ? "❌" : "⏹"}{" "}
+                    {t.summary ?? "(結果なし)"}
+                  </p>
+                </AgentMessage>
+              </Fragment>
             ))}
-            {tree.prompt && <p className="conversation-prompt">🖐 {tree.prompt}</p>}
-            {tree.taskStatus === "running" && (
-              <div className="run-controls">
-                <button onClick={handleCancel}>中断</button>
-              </div>
-            )}
+            {tree.prompt && <UserBubble text={tree.prompt} time={bubbleTime(tree.startedAt)} />}
             {tree.main && (
-              <div className="agent-tree">
+              <>
                 <AgentRowView
                   row={tree.main}
                   elapsedMs={elapsedMsFor(tree.main, activeSession.rowStartedAt, nowTick)}
@@ -1243,50 +1306,54 @@ export default function App() {
                   onRespondUserInput={respondUserInput}
                 />
                 {tree.subagents.map((sub) => (
-                  <div className="sub-indent" key={sub.key}>
-                    <AgentRowView
-                      row={sub}
-                      elapsedMs={elapsedMsFor(sub, activeSession.rowStartedAt, nowTick)}
-                      isSub
-                      onRespond={respondPermission}
-                      onRespondUserInput={respondUserInput}
-                    />
-                  </div>
+                  <AgentRowView
+                    key={sub.key}
+                    row={sub}
+                    elapsedMs={elapsedMsFor(sub, activeSession.rowStartedAt, nowTick)}
+                    isSub
+                    onRespond={respondPermission}
+                    onRespondUserInput={respondUserInput}
+                  />
                 ))}
-              </div>
+              </>
             )}
             {tree.taskStatus === "completed" && tree.summary && (
-              <div className="task-summary">
-                <h3>結果</h3>
-                <p>{tree.summary}</p>
+              <AgentMessage name={tree.main?.label ?? activeSession.agentId ?? "?"}>
+                <p>✅ {tree.summary}</p>
+              </AgentMessage>
+            )}
+            <div ref={chatEndRef} />
+            {tree.taskStatus === "running" && (
+              <div className="chat-input-bar">
+                <button type="button" onClick={handleCancel}>
+                  ⏹ 中断
+                </button>
               </div>
             )}
             {(tree.taskStatus === "completed" || tree.taskStatus === "failed" || tree.taskStatus === "cancelled") && (
-              <div className="task-summary">
-                <h3>続けて依頼する(このセッションに返信)</h3>
-                <p className="muted">これまでの会話は保持したまま、同じセッションの続きとして実行します。</p>
-                <textarea
-                  className="prompt-input"
-                  rows={2}
-                  value={replyMessage}
-                  onChange={(e) => setReplyMessage(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && e.ctrlKey) {
-                      e.preventDefault();
-                      handleReply();
-                    }
-                  }}
-                  placeholder="続けて依頼する内容を入力してください(Ctrl+Enter で送信)"
-                />
-                <div className="run-controls">
-                  <button type="button" onClick={handleReply} disabled={!replyMessage.trim()}>
-                    返信して続行
+              <>
+                <div className="chat-input-bar">
+                  <textarea
+                    rows={2}
+                    value={replyMessage}
+                    onChange={(e) => setReplyMessage(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && e.ctrlKey) {
+                        e.preventDefault();
+                        handleReply();
+                      }
+                    }}
+                    placeholder="メッセージを入力(Ctrl+Enter で送信)"
+                  />
+                  <button type="button" className="primary" onClick={handleReply} disabled={!replyMessage.trim()}>
+                    送信
                   </button>
                 </div>
+                <p className="muted">これまでの会話は保持したまま、同じセッションの続きとして実行します。</p>
                 {replyError && <p className="error">⚠ {replyError}</p>}
-              </div>
+              </>
             )}
-          </>
+          </div>
         ) : (
           <p className="muted">実行中・直近のセッションはまだありません</p>
         )}
