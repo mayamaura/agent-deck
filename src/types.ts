@@ -38,6 +38,21 @@ export interface DraftedAgent {
   body: string;
 }
 
+// src-tauri/src/copilot.rs ModelOption / ModelCatalog(list_models の戻り値)。
+// 一覧は Copilot から都度取得する(アプリ側にモデル名を持たない)。
+export interface ModelOption {
+  id: string;
+  name: string;
+  // プレミアムリクエストの倍率(0 なら無料枠)。不明なら null。
+  multiplier: number | null;
+}
+
+export interface ModelCatalog {
+  // 契約プラン名(individual / business / enterprise 等)。取得できなければ null。
+  plan: string | null;
+  models: ModelOption[];
+}
+
 // src-tauri/src/sync.rs SyncSummary(sync_shared_agents_cmd の戻り値)
 export interface SyncSummary {
   added: number;

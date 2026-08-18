@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { AgentDefinitionDto, AgentSettings, DraftedAgent } from "./types";
+import type { AgentDefinitionDto, AgentSettings, DraftedAgent, ModelCatalog, ModelOption } from "./types";
 import {
   AGENT_TOOL_OPTIONS,
   PERMISSION_TOOL_OPTIONS,
@@ -56,6 +56,12 @@ const EMPTY_DEF_FORM: DefinitionFormState = {
   tools: { mode: "all", checked: [], other: "" },
   body: "",
 };
+
+/** モデル選択欄の表示。倍率はプレミアムリクエストの消費量(0 は無料枠)。 */
+function modelLabel(m: ModelOption): string {
+  const cost = m.multiplier == null ? "" : m.multiplier === 0 ? " — 無料枠" : ` — プレミアム ×${m.multiplier}`;
+  return `${m.name}(${m.id})${cost}`;
+}
 
 /** 入出力設定の許可/拒否ツール入力欄。基本形はチェックボックス(スペルミス防止。ユーザー要望)、
  * 括弧付きパターン等は「高度なパターン」欄に手入力する。 */
@@ -137,6 +143,12 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
   const [drafting, setDrafting] = useState(false);
   const [draftStatus, setDraftStatus] = useState<string | null>(null);
 
+  // モデルの選択肢。契約プランで使えるものを Copilot から都度取得する(アプリ側に
+  // モデル名を持たないので、プランの違いも将来のモデル追加もそのまま反映される)。
+  // 取得は Copilot CLI の起動を伴うので数秒かかる。届くまでは「取得中」表示。
+  const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+
   function loadDefinition(d: AgentDefinitionDto) {
     setDefinition(d);
     setDefForm({
@@ -169,6 +181,12 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
       )
       .catch((e) => setDefinitionError(String(e)));
   }, [agentId]);
+
+  useEffect(() => {
+    invoke<ModelCatalog>("list_models")
+      .then(setCatalog)
+      .catch((e) => setCatalogError(String(e)));
+  }, []);
 
   async function handlePickFolder(target: "inputDir" | "outputDir") {
     const dir = await open({ directory: true });
@@ -340,13 +358,42 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
                 />
               </label>
               <label>
-                モデル(空欄でアプリ既定)
-                <input
-                  type="text"
-                  value={defForm.model}
-                  onChange={(e) => setDefForm((f) => ({ ...f, model: e.target.value }))}
-                />
+                モデル(未選択でアプリ既定)
+                {catalog ? (
+                  <select
+                    value={defForm.model}
+                    onChange={(e) => setDefForm((f) => ({ ...f, model: e.target.value }))}
+                  >
+                    <option value="">(アプリ既定)</option>
+                    {/* 一覧に無い設定値(プラン変更・モデル廃止など)も選択を保ったまま見せる */}
+                    {defForm.model && !catalog.models.some((m) => m.id === defForm.model) && (
+                      <option value={defForm.model}>{defForm.model}(現在の設定・今は選べません)</option>
+                    )}
+                    {catalog.models.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {modelLabel(m)}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  // 取得中は待たせず手入力も許す。失敗時はここが唯一の入力手段になる。
+                  <input
+                    type="text"
+                    value={defForm.model}
+                    placeholder={catalogError ? "モデル ID を入力" : "モデル一覧を取得中…"}
+                    onChange={(e) => setDefForm((f) => ({ ...f, model: e.target.value }))}
+                  />
+                )}
               </label>
+              {catalog && (
+                <p className="muted hint">
+                  {catalog.plan ? `契約プラン: ${catalog.plan}。` : ""}
+                  ログイン中のアカウントで使えるモデルを Copilot から取得しています。
+                </p>
+              )}
+              {catalogError && (
+                <p className="muted hint">⚠ モデル一覧を取得できませんでした({catalogError})</p>
+              )}
               <div className="tools-field">
                 <span className="tools-field-label">ツール</span>
                 <label className="radio-row">

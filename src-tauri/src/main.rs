@@ -277,6 +277,20 @@ async fn draft_agent_definition(app: tauri::AppHandle, request: String) -> Resul
     copilot::draft_agent(cli_path, model, workdir, request).await
 }
 
+/// 定義エディタのモデル選択肢(docs/requirements.md §3.4)。一覧はアプリに持たず毎回
+/// Copilot に問い合わせる: 契約プランごとの差と、将来のモデル追加・廃止に自動で追随する。
+#[tauri::command]
+async fn list_models(app: tauri::AppHandle) -> Result<copilot::ModelCatalog, String> {
+    // State のガード(!Send)を await に跨がせないよう、必要な値をここで取り切る。
+    let cli_path = {
+        let state = app.state::<AppState>();
+        let data_dir = state.data_dir()?.clone();
+        let cfg = config::load_app_config(&data_dir)?;
+        copilot::resolve_cli_path(cfg.copilot_cli_path.as_deref())?
+    };
+    copilot::list_models(cli_path).await
+}
+
 #[tauri::command]
 fn duplicate_agent(state: State<AppState>, agent_id: String) -> Result<(), String> {
     let data_dir = state.data_dir()?;
@@ -1013,6 +1027,7 @@ fn main() {
             save_agent_definition,
             create_agent_definition,
             draft_agent_definition,
+            list_models,
             duplicate_agent,
             rename_agent_definition,
             delete_agent_definition,

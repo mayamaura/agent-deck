@@ -11,6 +11,7 @@ use crate::permissions;
 use github_copilot_sdk::handler::{
     PermissionHandler, PermissionResult, UserInputHandler, UserInputResponse,
 };
+use github_copilot_sdk::rpc::ModelPolicyState;
 use github_copilot_sdk::session_events::{
     AssistantIntentData, AssistantMessageData, AssistantUsageData, SessionErrorData,
     SessionIdleData, SessionUsageInfoData, SubagentCompletedData, SubagentFailedData,
@@ -1268,6 +1269,70 @@ pub async fn run_task(
         started_at,
         duration_ms: task_start.elapsed().as_millis() as u64,
     })
+}
+
+// ===== 利用可能なモデル一覧(docs/requirements.md §3.4) =====
+
+/// 定義エディタのモデル選択肢 1 件。SDK の `Model` はここで DTO に落とす
+/// (SDK 型をフロントに流さない。docs/architecture.md §4)。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelOption {
+    /// `.agent.md` の model に書く ID(例 "claude-sonnet-4.5")。
+    pub id: String,
+    /// 表示名(例 "Claude Sonnet 4.5")。
+    pub name: String,
+    /// プレミアムリクエストの倍率(0 なら無料枠)。取得できなければ None。
+    pub multiplier: Option<f64>,
+}
+
+/// list_models の戻り値。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCatalog {
+    /// 契約プラン名(individual / business / enterprise 等)。取得できなければ None。
+    pub plan: Option<String>,
+    /// 選択できるモデル。SDK が返す順(既定が先頭)をそのまま保つ。
+    pub models: Vec<ModelOption>,
+}
+
+/// ログイン中のアカウントが使えるモデルを Copilot に問い合わせる。
+///
+/// **一覧はハードコードしない。** `models.list` は認証済みユーザーで解決されるため、
+/// 契約プランによる差も将来のモデル追加・廃止もそのまま反映される。組織ポリシーで
+/// 無効(policy.state = disabled)のモデルは選ばせない。
+pub async fn list_models(cli_path: PathBuf) -> Result<ModelCatalog, String> {
+    let client = Client::start(ClientOptions::new().with_program(CliProgram::Path(cli_path)))
+        .await
+        .map_err(|e| with_hint(&format!("Copilot CLI を起動できません: {e}")))?;
+
+    let plan = current_plan(&client).await;
+    let models = client.list_models().await.map_err(|e| with_hint(&format!("モデル一覧を取得できません: {e}")));
+    if let Err(e) = client.stop().await {
+        eprintln!("Client の停止に失敗しました: {e}");
+    }
+
+    let models = models?
+        .into_iter()
+        .filter(|m| !matches!(&m.policy, Some(p) if p.state == ModelPolicyState::Disabled))
+        .map(|m| ModelOption {
+            id: m.id,
+            name: m.name,
+            multiplier: m.billing.and_then(|b| b.multiplier),
+        })
+        .collect();
+    Ok(ModelCatalog { plan, models })
+}
+
+/// 契約プラン名。auth_info は SDK 側も `serde_json::Value` のままなので生 JSON から読む
+/// (キーは `copilotUser.copilot_plan`。SDK の CopilotUserResponse の serde 名に対応)。
+/// モデル一覧に添える表示だけの情報なので、取れなければ None にしてモデル選択は続行する。
+///
+/// **auth_info には GitHub のアクセストークンが平文で入る**(`token` フィールド)。
+/// 丸ごとログやエラー文に出さないこと。ここで取り出すのはプラン名だけ。
+async fn current_plan(client: &Client) -> Option<String> {
+    let auth = client.rpc().account().get_current_auth().await.ok()?;
+    Some(auth.auth_info?.get("copilotUser")?.get("copilot_plan")?.as_str()?.to_string())
 }
 
 // ===== エージェント定義の下書き生成(docs/roadmap.md v1.1 (b)) =====

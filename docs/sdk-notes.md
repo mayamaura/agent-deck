@@ -189,6 +189,35 @@ session.background_tasks_changed
 - SDK の `available_tools`/`excluded_tools`(`builtin:<name>` 空間)は上記と**別語彙**。
   全列挙定数は SDK に無い
 
+### モデル一覧と契約プラン(2026-08-18 実機検証。SDK 1.0.9)
+
+- **`Client::list_models() -> Result<Vec<Model>>`** が実在(`models.list` RPC)。
+  「ログイン中アカウントで解決された利用可能モデル」が返るので、**契約プランごとの差も
+  将来のモデル追加・廃止もアプリ側を直さずに追随できる**(ツールの語彙と違いハードコード不要)
+- `Model` の使えるフィールド: `id`(`.agent.md` の model に書く値)/ `name`(表示名)/
+  `billing.multiplier`(プレミアムリクエスト倍率。0 は無料枠)/ `policy.state`
+  (`enabled` / `disabled` / `unconfigured`。組織ポリシー)/ `model_picker_category`
+- 結果は **Client インスタンス単位でキャッシュ**される(`models_cache`)。最新を取り直すには
+  Client を作り直す(本アプリは取得のたびに `Client::start` → `stop`)
+- `ModelPolicyState` などの生成型は `github_copilot_sdk::rpc` 経由(`types` には未再エクスポート)
+- 契約プラン名は `client.rpc().account().get_current_auth()` の
+  `auth_info.copilotUser.copilot_plan`(`individual` / `business` / `enterprise` 等)。
+  `auth_info` は SDK 側も `serde_json::Value` のままなので生 JSON から読む
+- `account().get_quota()` でプレミアムリクエストの残枠も取れる(現時点では未使用)
+- **`auth_info` には GitHub のアクセストークンが平文で入る**(`token`)。丸ごとログや
+  エラー文に出さないこと(取り出すのはプラン名だけにする)
+
+実機で確認した挙動(2026-08-18、`cargo run --bin models_check`):
+
+- 開発機のアカウント(`copilot_plan: individual`、`premium_interactions` の
+  entitlement が 0)では **`models.list` が `auto` の 1 件だけ**を返した。
+  一覧はプランと利用枠を正しく反映している(アプリ側で足せるものではない)
+- セッション経由の `session.model.list` は **空配列**。モデル一覧は Client 側の
+  `list_models` を使う
+- `models.getBuiltInCatalog` はプラン非依存の既知 ID 一覧(`claude-*` / `gpt-*` /
+  `gemini-*` / `grok-*` …)を返すが、**選べるかどうかは含まない**ので UI には使わない
+  (選べないモデルを出すと実行時に初めて失敗する)
+
 ### 中断
 
 - **タスク中断の正道は `Session::abort()`**(`session.abort` RPC)。進行中の `send_and_wait` は
