@@ -3,6 +3,7 @@
 name = "agent-deck"
 version = "1.0.0"
 description = "Copilot エージェントに定型業務を依頼し、稼働状況をリアルタイム表示するデスクトップアプリ"
+license = "Apache-2.0"
 edition = "2021"
 # 検証バイナリ(smoke / stepN_check)があるため、tauri dev の cargo run 対象を明示
 default-run = "agent-deck"
