@@ -604,9 +604,25 @@ fn find_on_path() -> Option<PathBuf> {
     if !output.status.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let first_line = text.lines().next()?.trim();
-    (!first_line.is_empty()).then(|| PathBuf::from(first_line))
+    pick_executable(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// `where` の出力から Windows が直接起動できる 1 件を選ぶ。
+/// npm 版 CLI は `copilot.cmd` と同じディレクトリに拡張子なしの sh スクリプト `copilot` を置き、
+/// `where` はそちらを先に返す。1 行目を無条件に採用すると CreateProcess が
+/// 「%1 は有効な Win32 アプリケーションではありません (os error 193)」で失敗するため、
+/// 実行可能な拡張子を持つ行だけを候補にする(.cmd / .bat は Rust 標準が cmd.exe 経由で起動する)。
+fn pick_executable(where_output: &str) -> Option<PathBuf> {
+    where_output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .find(|path| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "exe" | "cmd" | "bat" | "com"))
+        })
 }
 
 /// SDK / CLI 由来のエラー文字列に、利用者向けの対処ヒントを付け足す(docs/roadmap.md v1.0 条件3:
@@ -630,6 +646,8 @@ fn with_hint(error: &str) -> String {
         Some("Copilot の利用枠(クレジット)を確認してください。時間をおいて再実行すると回復することがあります")
     } else if lower.contains("enoent") || lower.contains("no such file") || error.contains("見つかりません") {
         Some("設定の copilotCliPath、または環境変数 COPILOT_CLI_PATH を確認してください")
+    } else if lower.contains("os error 193") {
+        Some("PATH 上の copilot が拡張子なしのスクリプトの可能性があります。copilot.cmd か copilot.exe の絶対パスを設定の copilotCliPath か環境変数 COPILOT_CLI_PATH に指定してください")
     } else if lower.contains("timeout") || lower.contains("timed out") {
         Some("時間をおいて再実行してください。長時間かかる依頼はプロンプトを分割すると安定します")
     } else {
@@ -1849,6 +1867,34 @@ mod tests {
         let hinted = with_hint(original);
         assert!(hinted.contains(original));
         assert!(hinted.contains("COPILOT_CLI_PATH"));
+    }
+
+    #[test]
+    fn pick_executable_skips_extensionless_npm_shim() {
+        // npm 版の `where copilot` 出力を模した順序(拡張子なしのシェルスクリプトが先頭)。
+        let output = "C:\\npm\\copilot\r\nC:\\npm\\copilot.cmd\r\nC:\\npm\\copilot.ps1\r\n";
+        assert_eq!(pick_executable(output), Some(PathBuf::from("C:\\npm\\copilot.cmd")));
+    }
+
+    #[test]
+    fn pick_executable_takes_exe_when_present() {
+        assert_eq!(
+            pick_executable("C:\\tools\\copilot.exe\r\n"),
+            Some(PathBuf::from("C:\\tools\\copilot.exe"))
+        );
+    }
+
+    #[test]
+    fn pick_executable_returns_none_when_only_scripts_found() {
+        assert_eq!(pick_executable("C:\\tools\\copilot\r\nC:\\tools\\copilot.ps1\r\n"), None);
+    }
+
+    #[test]
+    fn with_hint_adds_shim_advice_for_win32_error() {
+        let original = "Copilot CLI を起動できません: %1 は有効な Win32 アプリケーションではありません。 (os error 193)";
+        let hinted = with_hint(original);
+        assert!(hinted.contains(original));
+        assert!(hinted.contains("copilot.cmd"));
     }
 
     #[test]
