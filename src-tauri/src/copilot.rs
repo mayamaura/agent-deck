@@ -1038,16 +1038,25 @@ fn build_message_text(prompt: &str, input_dir: Option<&Path>, output_dir: Option
     if let Some(dir) = input_dir {
         lines.push(format!("入力フォルダ(読み取り元): {}", dir.display()));
     }
-    if let Some(dir) = output_dir {
+    // 出力と作業が同じフォルダ(どちらも未設定で既定に落ちた場合)なら 1 行にまとめる。
+    // 同じパスを別々の役割で 2 行並べても、モデルにとっては書き分けようがない。
+    if output_dir == Some(work_dir) {
         lines.push(format!(
-            "出力フォルダ: {}(成果物のファイルは必ずこのフォルダに保存すること)",
-            dir.display()
+            "出力・作業フォルダ: {}(成果物も中間ファイルもここに保存すること)",
+            work_dir.display()
+        ));
+    } else {
+        if let Some(dir) = output_dir {
+            lines.push(format!(
+                "出力フォルダ: {}(成果物のファイルは必ずこのフォルダに保存すること)",
+                dir.display()
+            ));
+        }
+        lines.push(format!(
+            "作業フォルダ: {}(現在の作業ディレクトリ。中間ファイルや書いたスクリプトはここに置くこと)",
+            work_dir.display()
         ));
     }
-    lines.push(format!(
-        "作業フォルダ: {}(現在の作業ディレクトリ。中間ファイルや書いたスクリプトはここに置くこと)",
-        work_dir.display()
-    ));
     format!("[環境情報]\n{}\n\n[依頼]\n{}", lines.join("\n"), prompt)
 }
 
@@ -1636,6 +1645,16 @@ mod tests {
         assert!(text.contains("出力フォルダ: C:/work/out"));
         assert!(text.contains("作業フォルダ: C:/work/ws"));
         assert!(text.ends_with("[依頼]\n集計して"), "依頼文は末尾にそのまま残る: {text}");
+    }
+
+    /// 出力フォルダ未設定なら start_task が作業フォルダと同じ既定を入れる。
+    /// 同じパスが 2 行に割れず、1 行にまとまること。
+    #[test]
+    fn build_message_text_merges_identical_output_and_work_dir() {
+        let dir = PathBuf::from("C:/data/workspace/survey-analyst");
+        let text = build_message_text("集計して", None, Some(&dir), &dir);
+        assert!(text.contains("出力・作業フォルダ: C:/data/workspace/survey-analyst"));
+        assert_eq!(text.matches("C:/data/workspace/survey-analyst").count(), 1);
     }
 
     #[test]

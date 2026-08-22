@@ -482,6 +482,12 @@ fn open_update_folder(state: State<AppState>) -> Result<(), String> {
     open_in_explorer(&dir)
 }
 
+/// 出力フォルダ・作業フォルダが未設定のときの既定(docs/architecture.md §7.2)。
+/// 両方未設定ならこの 1 つのフォルダが出力先と作業先を兼ねる。
+fn default_workspace(data_dir: &Path, agent_id: &str) -> PathBuf {
+    data_dir.join("workspace").join(agent_id)
+}
+
 /// Windows 専用アプリなので explorer を直接呼ぶ(プラグイン不要)。
 fn open_in_explorer(dir: &Path) -> Result<(), String> {
     std::process::Command::new("explorer")
@@ -512,33 +518,33 @@ fn list_history(state: State<AppState>, limit: usize) -> Result<Vec<history::His
     history::list(data_dir, limit)
 }
 
-#[tauri::command]
-fn open_output_folder(state: State<AppState>, agent_id: String) -> Result<(), String> {
+/// 出力／作業フォルダをエクスプローラで開く(docs/requirements.md §3.6)。未設定でも
+/// start_task と同じ既定を開く — 未設定時はそこが実際の書き込み先なので、
+/// 「未設定です」で断ると中身を確認できない。
+fn open_agent_dir(
+    state: State<AppState>,
+    agent_id: &str,
+    pick: fn(&AgentSettings) -> Option<PathBuf>,
+) -> Result<(), String> {
     let data_dir = state.data_dir()?;
     let cfg = config::load_agents_config(data_dir)?;
     let dir = cfg
         .agents
-        .get(&agent_id)
-        .and_then(|a| a.output_dir.clone())
-        .ok_or("出力フォルダが未設定です")?;
+        .get(agent_id)
+        .and_then(pick)
+        .unwrap_or_else(|| default_workspace(data_dir, agent_id));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("フォルダを作成できません({}): {e}", dir.display()))?;
     open_in_explorer(&dir)
 }
 
-/// 作業フォルダをエクスプローラで開く(docs/requirements.md §3.6)。未設定なら
-/// start_task と同じ既定(data/workspace/<agentId>)を開く — 中間ファイルは
-/// そこに溜まっているため、「未設定です」で断ると確認できない。
+#[tauri::command]
+fn open_output_folder(state: State<AppState>, agent_id: String) -> Result<(), String> {
+    open_agent_dir(state, &agent_id, |a| a.output_dir.clone())
+}
+
 #[tauri::command]
 fn open_work_folder(state: State<AppState>, agent_id: String) -> Result<(), String> {
-    let data_dir = state.data_dir()?;
-    let cfg = config::load_agents_config(data_dir)?;
-    let dir = cfg
-        .agents
-        .get(&agent_id)
-        .and_then(|a| a.work_dir.clone())
-        .unwrap_or_else(|| data_dir.join("workspace").join(&agent_id));
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("作業フォルダを作成できません({}): {e}", dir.display()))?;
-    open_in_explorer(&dir)
+    open_agent_dir(state, &agent_id, |a| a.work_dir.clone())
 }
 
 /// 監査ログフォルダ(data/logs/)をエクスプローラで開く(docs/roadmap.md v0.6)。
@@ -657,11 +663,12 @@ fn spawn_task_inner(
     // 入力フォルダの親を使うと、入力に Documents を選んだだけでプロファイル直下が
     // 作業ディレクトリになってしまうため。
     let agents_cfg = config::load_agents_config(&data_dir)?;
+    let default_dir = default_workspace(&data_dir, &agent_id);
     let working_directory = agents_cfg
         .agents
         .get(&agent_id)
         .and_then(|s| s.work_dir.clone())
-        .unwrap_or_else(|| data_dir.join("workspace").join(&agent_id));
+        .unwrap_or_else(|| default_dir.clone());
     std::fs::create_dir_all(&working_directory)
         .map_err(|e| format!("作業フォルダを作成できません({}): {e}", working_directory.display()))?;
 
@@ -676,6 +683,14 @@ fn spawn_task_inner(
     // UI からは変更できない(get_app_config で一覧表示するだけ)。
     if let Some(policy) = config::load_policy(&data_dir)? {
         rules.denied_tools = config::merge_forced_denied_tools(rules.denied_tools, &policy.forced_denied_tools);
+    }
+    // 出力フォルダ未設定なら作業フォルダと同じ既定に落とす(docs/architecture.md §7.2)。
+    // 「成果物がどこにも決まっていない」状態を作らないため。自動承認(§7.1)と
+    // [環境情報] の出力先もこの解決済みの値を見る。agents.json 自体は書き換えない。
+    if rules.output_dir.is_none() {
+        std::fs::create_dir_all(&default_dir)
+            .map_err(|e| format!("出力フォルダを作成できません({}): {e}", default_dir.display()))?;
+        rules.output_dir = Some(default_dir);
     }
     // 実行中タスクと同じ outputDir なら起動を拒否する(docs/roadmap.md v0.5: 成果物の混線防止)。
     let output_dir = rules.output_dir.clone();

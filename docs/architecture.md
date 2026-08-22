@@ -223,6 +223,7 @@ SDK イベント → AppEvent の対応(ステップ2で実装。イベント名
 
 1. `deniedTools` に該当 → 無条件で拒否
 2. 書き込み先が `outputDir` または `workDir` 配下、かつ `autoApproveWriteInOutputDir` が true → 自動承認
+   (どちらも §7.2 で解決済みの実パス。未設定なら既定フォルダが入っている)
 3. `allowedTools` に該当 → 自動承認
 4. それ以外 → `PermissionRequested` を emit して UI で確認
 
@@ -235,6 +236,12 @@ SDK 側の接続点は `PermissionHandler` トレイトの自前実装
 `data/workspace/<agentId>`(起動時に自動作成)。入出力フォルダとは独立した
 設定で、成果物(`outputDir`)と中間ファイル・生成スクリプト(`workDir`)を
 別の場所に分けられる。
+
+`outputDir` も未設定なら同じ `data/workspace/<agentId>` を使う
+(「成果物がどこにも決まっていない」状態を作らない)。両方未設定なら 1 つの
+フォルダが出力先と作業先を兼ね、`[環境情報]` にも 1 行にまとめて渡す。
+解決は `start_task` が実行のたびに行い、agents.json 自体は未設定のまま
+書き換えない(ユーザーが決めていないことを勝手に既定値で固定しない)。
 
 **`inputDir` / `outputDir` から作業ディレクトリを推測しないこと。**
 入力フォルダの親を使う実装だと、入力に `Documents` を選んだだけで

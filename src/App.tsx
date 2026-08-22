@@ -648,7 +648,7 @@ export default function App() {
 
   /** タスクを起動する(実行ボタンとスケジュール行の「今すぐ実行」で共用)。
    * docs/roadmap.md v0.5: 実行中でも他エージェントの実行は有効(並行実行)。
-   * 同一エージェントの二重実行は outputDir 制限があればバックエンドがエラーを返す。
+   * 同一エージェントの二重実行は outputDir が同じになるためバックエンドがエラーを返す。
    * startingAgents ガードは Ctrl+Enter 連打対策(ボタンの disabled だけでは防げない)。 */
   async function startTask(agentId: string, promptText: string) {
     if (!promptText.trim() || startingAgents[agentId] != null) return;
@@ -1118,7 +1118,9 @@ export default function App() {
         <ul>
           {agents.map((a) => {
             const c = configs[a.id];
-            const unset = !c || !c.inputDir || !c.outputDir;
+            // 出力フォルダは未設定でも既定(data/workspace/<agentId>)に落ちるので、
+            // 実行前に決めておく必要があるのは読み取り元の入力フォルダだけ。
+            const unset = !c || !c.inputDir;
             return (
               <li key={`${a.id}:${a.scope}`}>
                 <button

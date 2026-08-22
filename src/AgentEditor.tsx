@@ -497,6 +497,7 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
               type="text"
               value={form.outputDir}
               onChange={(e) => setForm((f) => ({ ...f, outputDir: e.target.value }))}
+              placeholder="未設定なら data/workspace/<エージェントID>"
             />
             <button type="button" onClick={() => handlePickFolder("outputDir")}>
               選択...
@@ -520,6 +521,8 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
         <p className="muted">
           作業フォルダはエージェントの作業机です。中間ファイルや、集計のために書いたスクリプトはここに置かれます。
           出力フォルダと同じく、配下への書き込みは承認なしで進みます。
+          出力・作業フォルダはどちらも未設定なら data/workspace/&lt;エージェントID&gt; が使われ、この場合は同じ 1
+          つのフォルダに成果物も中間ファイルもまとまります。
         </p>
         <PermissionToolsField
           label="自動承認ツール(確認なしで実行を許可)"
