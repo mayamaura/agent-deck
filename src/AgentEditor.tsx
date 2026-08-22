@@ -464,10 +464,10 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
               </label>
               <div className="run-controls">
                 <button type="button" onClick={handleSaveDefinition}>
-                  保存
+                  定義を保存
                 </button>
                 <button type="button" onClick={handleDeleteDefinition}>
-                  削除
+                  定義を削除
                 </button>
               </div>
               {defSaveStatus && <p className="muted">{defSaveStatus}</p>}
@@ -556,7 +556,7 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
         />
         <div className="run-controls">
           <button type="button" onClick={handleSaveConfig}>
-            保存
+            入出力設定を保存
           </button>
         </div>
         {saveStatus && <p className="muted">{saveStatus}</p>}
