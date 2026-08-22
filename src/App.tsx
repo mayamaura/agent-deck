@@ -502,12 +502,14 @@ export default function App() {
   }, []);
 
   // 設定ウインドウでの保存・削除を一覧へ反映する(別 webview なので状態は共有されない)。
+  // cleanup は Promise の解決を待ってから解除する(AgentEditor.tsx と同じイディオム)。
+  // 解決前に cleanup が走るとリスナーが残留し、StrictMode の二重マウントで
+  // 全イベントが二重処理される(プロンプト・承認カードの二重表示の原因)。
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    listen(AGENTS_CHANGED, () => reloadAgents()).then((fn) => {
-      unlisten = fn;
-    });
-    return () => unlisten?.();
+    const unlisten = listen(AGENTS_CHANGED, () => reloadAgents());
+    return () => {
+      unlisten.then((fn) => fn());
+    };
   }, []);
 
   // 一覧に出す「未設定」バッジのため、全エージェント分の設定をまとめて取得する
@@ -529,8 +531,7 @@ export default function App() {
   // sessionId ごとにセッションを束ねる(docs/roadmap.md v0.5: 並行実行)。taskStarted は
   // 新しい sessionId で来るため、既存セッションを壊さず新しいタブが増える形になる。
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    listen<AppEvent>(EVENT_CHANNEL, ({ payload: ev }) => {
+    const unlisten = listen<AppEvent>(EVENT_CHANNEL, ({ payload: ev }) => {
       const logged: LoggedEvent = { time: new Date().toLocaleTimeString(), event: ev };
       const sid = ev.sessionId;
       // allowRuleAdded 用: このセッションが属するエージェント id(setSessions のアップデータ内
@@ -595,10 +596,10 @@ export default function App() {
         reloadSchedules();
         setSessions((prev) => pruneOldFinishedSessions(prev));
       }
-    }).then((fn) => {
-      unlisten = fn;
     });
-    return () => unlisten?.();
+    return () => {
+      unlisten.then((fn) => fn());
+    };
   }, []);
 
   // アクティブなタブが間引かれて消えた場合、直近のセッションへフォールバックする。
