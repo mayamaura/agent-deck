@@ -1,8 +1,8 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { open } from "@tauri-apps/plugin-dialog";
+import { confirm, open } from "@tauri-apps/plugin-dialog";
 import type { AgentDefinitionDto, AgentSettings, DraftedAgent, ModelCatalog, ModelOption } from "./types";
 import {
   AGENT_TOOL_OPTIONS,
@@ -121,6 +121,13 @@ function PermissionToolsField({
   );
 }
 
+/** 未保存判定用の比較。チェック集合は順序が変わっても同じ扱いにする
+ * (付け外しの順序ゆらぎで「保存していません」が誤爆するのを防ぐ)。 */
+export function sameForm(a: unknown, b: unknown): boolean {
+  const norm = (v: unknown) => JSON.stringify(v, (_, x) => (Array.isArray(x) ? [...x].sort() : x));
+  return norm(a) === norm(b);
+}
+
 /**
  * エージェント 1 件の設定ウインドウ(定義 + 入出力設定)。メインウインドウとは別プロセスの
  * webview なので状態は共有しない。保存のたびに AGENTS_CHANGED を emit してメイン側に再取得させる。
@@ -139,6 +146,14 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
   const [form, setForm] = useState<ConfigFormState>(EMPTY_FORM);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
 
+  // 保存済みの内容。読み込み時と保存成功時に現在のフォームで更新し、差があれば未保存とみなす。
+  // 各 onChange にフラグ立てを仕込むより、比較 1 本の方が付け忘れが起きない。
+  const [savedDefForm, setSavedDefForm] = useState<DefinitionFormState>(EMPTY_DEF_FORM);
+  const [savedForm, setSavedForm] = useState<ConfigFormState>(EMPTY_FORM);
+  const defDirty = !sameForm(defForm, savedDefForm);
+  const configDirty = !sameForm(form, savedForm);
+  const dirty = defDirty || configDirty;
+
   // 定義の下書きを Copilot に書かせる(docs/roadmap.md v1.1)。生成結果はフォームに
   // 流し込むだけで、ファイルに書くのは利用者が「保存」を押したとき。
   const [draftRequest, setDraftRequest] = useState("");
@@ -153,14 +168,16 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
 
   function loadDefinition(d: AgentDefinitionDto) {
     setDefinition(d);
-    setDefForm({
+    const loaded: DefinitionFormState = {
       id: d.id,
       name: d.name,
       description: d.description,
       model: d.model ?? "",
       tools: decomposeAgentTools(d.tools),
       body: d.body,
-    });
+    };
+    setDefForm(loaded);
+    setSavedDefForm(loaded);
   }
 
   useEffect(() => {
@@ -172,18 +189,42 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
       .then(loadDefinition)
       .catch((e) => setDefinitionError(String(e)));
     invoke<AgentSettings | null>("get_agent_config", { agentId })
-      .then((c) =>
-        setForm({
+      .then((c) => {
+        const loaded: ConfigFormState = {
           inputDir: c?.inputDir ?? "",
           outputDir: c?.outputDir ?? "",
           workDir: c?.workDir ?? "",
           allowedTools: decomposePermissionTools(c?.allowedTools ?? []),
           deniedTools: decomposePermissionTools(c?.deniedTools ?? []),
           autoApprove: c?.autoApproveWriteInOutputDir ?? true,
-        }),
-      )
+        };
+        setForm(loaded);
+        setSavedForm(loaded);
+      })
       .catch((e) => setDefinitionError(String(e)));
   }, [agentId]);
+
+  // 未保存のまま閉じようとしたら確認する。onCloseRequested のコールバックは登録時の
+  // クロージャを握るので、最新の状態は ref 経由で読む(登録し直すと解除と競合する)。
+  const dirtyRef = useRef(false);
+  const skipCloseGuardRef = useRef(false);
+  dirtyRef.current = dirty;
+
+  useEffect(() => {
+    const unlisten = getCurrentWebviewWindow().onCloseRequested(async (event) => {
+      if (skipCloseGuardRef.current || !dirtyRef.current) return;
+      // Tauri 側が handler を await するので非同期ダイアログでよい(@tauri-apps/api の
+      // onCloseRequested 実装)。window.confirm は閉じる処理の最中だと表示されない。
+      const ok = await confirm("保存していない変更があります。破棄して閉じますか?", {
+        title: "未保存の変更",
+        kind: "warning",
+      });
+      if (!ok) event.preventDefault();
+    });
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, []);
 
   useEffect(() => {
     invoke<ModelCatalog>("list_models")
@@ -207,6 +248,7 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
     };
     try {
       await invoke("save_agent_config", { agentId: id, settings });
+      setSavedForm(form);
       setSaveStatus("✅ 保存しました");
       await emit(AGENTS_CHANGED);
     } catch (e) {
@@ -233,6 +275,7 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
         model: defForm.model.trim() || null,
         body: defForm.body,
       });
+      setSavedDefForm({ ...defForm, id: nextId });
       setDefSaveStatus("✅ 保存しました");
       await emit(AGENTS_CHANGED);
     } catch (e) {
@@ -246,7 +289,9 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
     // 生成は name/description/tools/body をまとめて置き換える。書きかけがあれば確認する
     // (保存前なのでファイルは無事だが、編集中の文章が消えるのは驚きになる)。
     const hasEdits = Boolean(defForm.name || defForm.description || defForm.body);
-    if (hasEdits && !window.confirm("名前・説明・ツール・本文を下書きで置き換えます。よろしいですか?")) return;
+    if (hasEdits && !(await confirm("名前・説明・ツール・本文を下書きで置き換えます。よろしいですか?", { title: "下書きで置き換え", kind: "warning" }))) {
+      return;
+    }
     setDrafting(true);
     setDraftStatus(null);
     try {
@@ -267,11 +312,13 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
   }
 
   async function handleDeleteDefinition() {
-    if (!window.confirm(`エージェント定義「${id}」を削除しますか?`)) return;
+    if (!(await confirm(`エージェント定義「${id}」を削除しますか?`, { title: "定義の削除", kind: "warning" }))) return;
     try {
       await invoke("delete_agent_definition", { agentId: id });
       await emit(AGENTS_CHANGED);
       // 対象が消えたウインドウを残しても操作できないので閉じる。
+      // 定義ごと消したので、編集中だった内容の破棄確認はもう意味がない。
+      skipCloseGuardRef.current = true;
       await getCurrentWebviewWindow().close();
     } catch (e) {
       setDefinitionError(String(e));
@@ -466,6 +513,7 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
                 <button type="button" onClick={handleSaveDefinition}>
                   定義を保存
                 </button>
+                {defDirty && <span className="badge">● 未保存</span>}
                 <button type="button" onClick={handleDeleteDefinition}>
                   定義を削除
                 </button>
@@ -558,6 +606,7 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
           <button type="button" onClick={handleSaveConfig}>
             入出力設定を保存
           </button>
+          {configDirty && <span className="badge">● 未保存</span>}
         </div>
         {saveStatus && <p className="muted">{saveStatus}</p>}
       </div>

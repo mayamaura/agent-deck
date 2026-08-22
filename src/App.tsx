@@ -2,7 +2,7 @@ import { Fragment, useEffect, useRef, useState, type CSSProperties, type ReactNo
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { open } from "@tauri-apps/plugin-dialog";
+import { confirm, open } from "@tauri-apps/plugin-dialog";
 import type {
   AgentSettings,
   AgentSummary,
@@ -757,7 +757,7 @@ export default function App() {
   }
 
   async function handleDeleteSchedule(id: string) {
-    if (!window.confirm("このスケジュールを削除しますか?")) return;
+    if (!(await confirm("このスケジュールを削除しますか?", { title: "スケジュールの削除", kind: "warning" }))) return;
     setScheduleError(null);
     try {
       await invoke("delete_schedule", { id });
@@ -860,7 +860,7 @@ export default function App() {
 
   /** 一覧の右クリックからの削除(個人スコープのみ。AgentEditor の削除と同じコマンド)。 */
   async function handleDeleteAgent(agentId: string) {
-    if (!window.confirm(`エージェント定義「${agentId}」を削除しますか?`)) return;
+    if (!(await confirm(`エージェント定義「${agentId}」を削除しますか?`, { title: "定義の削除", kind: "warning" }))) return;
     setError(null);
     try {
       await invoke("delete_agent_definition", { agentId });

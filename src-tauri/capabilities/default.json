@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "メインウィンドウとエージェント設定ウインドウの既定権限",
+  "description": "メインウィンドウとエージェント設定ウインドウの既定権限。onCloseRequested を登録したウインドウは Tauri が自動で閉じず JS の destroy() に委ねるため、close だけでなく destroy も要る",
   "windows": ["main", "agent-editor-*"],
   "permissions": [
     "core:default",
@@ -9,6 +9,7 @@
     "notification:default",
     "core:webview:allow-create-webview-window",
     "core:window:allow-set-focus",
-    "core:window:allow-close"
+    "core:window:allow-close",
+    "core:window:allow-destroy"
   ]
 }
