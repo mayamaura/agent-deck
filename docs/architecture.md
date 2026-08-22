@@ -195,6 +195,7 @@ SDK イベント → AppEvent の対応(ステップ2で実装。イベント名
     "survey-analyst": {
       "inputDir": "C:/work/data/survey/input",
       "outputDir": "C:/work/data/survey/output",
+      "workDir": "C:/work/data/survey/work",
       "allowedTools": ["write", "shell(python:*)"],
       "deniedTools": ["shell(rm)"],
       "autoApproveWriteInOutputDir": true
@@ -221,7 +222,7 @@ SDK イベント → AppEvent の対応(ステップ2で実装。イベント名
 ### 7.1 判定ロジック(実装: `permissions::decide`)
 
 1. `deniedTools` に該当 → 無条件で拒否
-2. 書き込み先が `outputDir` 配下、かつ `autoApproveWriteInOutputDir` が true → 自動承認
+2. 書き込み先が `outputDir` または `workDir` 配下、かつ `autoApproveWriteInOutputDir` が true → 自動承認
 3. `allowedTools` に該当 → 自動承認
 4. それ以外 → `PermissionRequested` を emit して UI で確認
 
@@ -230,14 +231,23 @@ SDK 側の接続点は `PermissionHandler` トレイトの自前実装
 
 ### 7.2 作業ディレクトリ
 
-セッションの作業ディレクトリは、そのエージェントの `inputDir` の親、
-または専用のワークスペースフォルダに限定する。
-**ユーザープロファイル直下や、無関係なファイルを含む親フォルダを
-作業ディレクトリにしないこと。**
+セッションの作業ディレクトリは、agents.json の `workDir`。未設定なら
+`data/workspace/<agentId>`(起動時に自動作成)。入出力フォルダとは独立した
+設定で、成果物(`outputDir`)と中間ファイル・生成スクリプト(`workDir`)を
+別の場所に分けられる。
+
+**`inputDir` / `outputDir` から作業ディレクトリを推測しないこと。**
+入力フォルダの親を使う実装だと、入力に `Documents` を選んだだけで
+ユーザープロファイル直下が作業ディレクトリになる。同じ理由で、ユーザーが
+`workDir` に何を指定してもよいわけではないが、明示指定は本人の意思なので
+アプリ側では制限しない。
+
+`workDir` の実パスは `[環境情報]` としてモデルにも渡す(§7.1 の自動承認対象でも
+あるため、中間ファイルの置き場としてモデルに認識させる)。
 
 ### 7.3 パス判定
 
-`outputDir` 配下かどうかの判定は、文字列前方一致ではなく
+`outputDir` / `workDir` 配下かどうかの判定は、文字列前方一致ではなく
 **正規化した絶対パス**で行う(`..` やシンボリックリンクによる脱出を防ぐ)。
 実装は `permissions::is_within`(存在しないパスは実在する最深の祖先まで
 canonicalize し、残り成分に `..` があれば不正扱い)。境界ケースはユニットテストで担保。

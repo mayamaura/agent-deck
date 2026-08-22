@@ -81,6 +81,7 @@ async fn main() {
     let rules = AgentSettings {
         input_dir: None,
         output_dir: Some(out.clone()),
+        work_dir: None,
         allowed_tools: Vec::new(),
         denied_tools: Vec::new(),
         auto_approve_write_in_output_dir: true,

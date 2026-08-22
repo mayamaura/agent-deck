@@ -23,6 +23,7 @@ export const AGENTS_CHANGED = "agents-changed";
 interface ConfigFormState {
   inputDir: string;
   outputDir: string;
+  workDir: string;
   allowedTools: PermissionToolsFormState;
   deniedTools: PermissionToolsFormState;
   autoApprove: boolean;
@@ -31,6 +32,7 @@ interface ConfigFormState {
 const EMPTY_FORM: ConfigFormState = {
   inputDir: "",
   outputDir: "",
+  workDir: "",
   allowedTools: { checked: [], other: "" },
   deniedTools: { checked: [], other: "" },
   autoApprove: true,
@@ -174,6 +176,7 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
         setForm({
           inputDir: c?.inputDir ?? "",
           outputDir: c?.outputDir ?? "",
+          workDir: c?.workDir ?? "",
           allowedTools: decomposePermissionTools(c?.allowedTools ?? []),
           deniedTools: decomposePermissionTools(c?.deniedTools ?? []),
           autoApprove: c?.autoApproveWriteInOutputDir ?? true,
@@ -188,7 +191,7 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
       .catch((e) => setCatalogError(String(e)));
   }, []);
 
-  async function handlePickFolder(target: "inputDir" | "outputDir") {
+  async function handlePickFolder(target: "inputDir" | "outputDir" | "workDir") {
     const dir = await open({ directory: true });
     if (typeof dir === "string") setForm((f) => ({ ...f, [target]: dir }));
   }
@@ -197,6 +200,7 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
     const settings: AgentSettings = {
       inputDir: form.inputDir.trim() || null,
       outputDir: form.outputDir.trim() || null,
+      workDir: form.workDir.trim() || null,
       allowedTools: composePermissionTools(form.allowedTools),
       deniedTools: composePermissionTools(form.deniedTools),
       autoApproveWriteInOutputDir: form.autoApprove,
@@ -499,6 +503,24 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
             </button>
           </div>
         </label>
+        <label>
+          作業フォルダ
+          <div className="folder-row">
+            <input
+              type="text"
+              value={form.workDir}
+              onChange={(e) => setForm((f) => ({ ...f, workDir: e.target.value }))}
+              placeholder="未設定なら data/workspace/<エージェントID>"
+            />
+            <button type="button" onClick={() => handlePickFolder("workDir")}>
+              選択...
+            </button>
+          </div>
+        </label>
+        <p className="muted">
+          作業フォルダはエージェントの作業机です。中間ファイルや、集計のために書いたスクリプトはここに置かれます。
+          出力フォルダと同じく、配下への書き込みは承認なしで進みます。
+        </p>
         <PermissionToolsField
           label="自動承認ツール(確認なしで実行を許可)"
           description="チェックした種類の操作は、承認ダイアログを出さずに実行されます。実行中のダイアログで「常に許可」を選ぶと、ここに自動で追加されます。"

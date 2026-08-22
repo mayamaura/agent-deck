@@ -108,6 +108,11 @@ pub struct AgentsConfig {
 pub struct AgentSettings {
     pub input_dir: Option<PathBuf>,
     pub output_dir: Option<PathBuf>,
+    /// セッションの作業ディレクトリ(docs/architecture.md §7.2)。中間ファイル・生成した
+    /// スクリプトの置き場で、成果物の output_dir とは別に指定できる。None なら
+    /// start_task が data/workspace/<agentId> を使う。
+    #[serde(default)]
+    pub work_dir: Option<PathBuf>,
     #[serde(default)]
     pub allowed_tools: Vec<String>,
     #[serde(default)]
@@ -127,6 +132,7 @@ impl Default for AgentSettings {
         Self {
             input_dir: None,
             output_dir: None,
+            work_dir: None,
             allowed_tools: Vec::new(),
             denied_tools: Vec::new(),
             auto_approve_write_in_output_dir: true,
@@ -219,6 +225,7 @@ mod tests {
             AgentSettings {
                 input_dir: Some(PathBuf::from("C:/work/in")),
                 output_dir: Some(PathBuf::from("C:/work/out")),
+                work_dir: None,
                 allowed_tools: vec!["write".into(), "shell(python:*)".into()],
                 denied_tools: vec!["shell(rm)".into()],
                 auto_approve_write_in_output_dir: true,

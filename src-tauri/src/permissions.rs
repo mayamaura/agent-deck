@@ -36,9 +36,13 @@ pub fn decide(settings: &AgentSettings, input: &PermissionInput) -> Decision {
     if settings.denied_tools.iter().any(|p| tool_matches(p, input)) {
         return Decision::Deny;
     }
+    // 出力フォルダに加えて作業フォルダ配下も自動承認する(docs/architecture.md §7.2)。
+    // 作業フォルダは中間ファイル・生成スクリプトの置き場なので、ここへの書き込みが毎回
+    // Ask になると分けた意味がない。フラグ名は agents.json 互換のため据え置き。
     if settings.auto_approve_write_in_output_dir {
-        if let (Some(output_dir), Some(write_path)) = (&settings.output_dir, &input.write_path) {
-            if is_within(output_dir, write_path) {
+        if let Some(write_path) = &input.write_path {
+            let auto_dirs = [settings.output_dir.as_deref(), settings.work_dir.as_deref()];
+            if auto_dirs.iter().flatten().any(|dir| is_within(dir, write_path)) {
                 return Decision::Approve;
             }
         }
@@ -120,6 +124,7 @@ mod tests {
         AgentSettings {
             input_dir: None,
             output_dir: Some(output_dir.to_path_buf()),
+            work_dir: None,
             allowed_tools: vec!["read".into()],
             denied_tools: vec!["shell(rm)".into()],
             auto_approve_write_in_output_dir: true,
@@ -135,6 +140,23 @@ mod tests {
             tool_name: "write".into(),
             detail: None,
             write_path: Some(dir.join("report.md")),
+            read_path: None,
+        };
+        assert_eq!(decide(&s, &input), Decision::Approve);
+    }
+
+    #[test]
+    fn work_dir_write_is_approved() {
+        let out = std::env::temp_dir().join("agent_deck_test_out");
+        let work = std::env::temp_dir().join("agent_deck_test_work");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        let mut s = settings(&out);
+        s.work_dir = Some(work.clone());
+        let input = PermissionInput {
+            tool_name: "write".into(),
+            detail: None,
+            write_path: Some(work.join("tmp.csv")),
             read_path: None,
         };
         assert_eq!(decide(&s, &input), Decision::Approve);

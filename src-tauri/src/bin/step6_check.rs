@@ -178,6 +178,7 @@ async fn run_round_a(cli_path: &PathBuf, ws: &PathBuf, out: &PathBuf, temp_data:
     let rules = config::AgentSettings {
         input_dir: None,
         output_dir: Some(out.clone()),
+        work_dir: None,
         allowed_tools: Vec::new(),
         denied_tools: Vec::new(),
         auto_approve_write_in_output_dir: true,

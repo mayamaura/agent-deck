@@ -479,9 +479,13 @@ fn open_update_folder(state: State<AppState>) -> Result<(), String> {
     let data_dir = state.data_dir()?;
     let cfg = config::load_app_config(data_dir)?;
     let dir = cfg.update_source.ok_or("更新配布フォルダが未設定です")?;
-    // Windows 専用アプリなので explorer を直接呼ぶ(プラグイン不要。open_output_folder と同じ方式)。
+    open_in_explorer(&dir)
+}
+
+/// Windows 専用アプリなので explorer を直接呼ぶ(プラグイン不要)。
+fn open_in_explorer(dir: &Path) -> Result<(), String> {
     std::process::Command::new("explorer")
-        .arg(&dir)
+        .arg(dir)
         .spawn()
         .map_err(|e| format!("エクスプローラを起動できません: {e}"))?;
     Ok(())
@@ -517,12 +521,24 @@ fn open_output_folder(state: State<AppState>, agent_id: String) -> Result<(), St
         .get(&agent_id)
         .and_then(|a| a.output_dir.clone())
         .ok_or("出力フォルダが未設定です")?;
-    // Windows 専用アプリなので explorer を直接呼ぶ(プラグイン不要)
-    std::process::Command::new("explorer")
-        .arg(&dir)
-        .spawn()
-        .map_err(|e| format!("エクスプローラを起動できません: {e}"))?;
-    Ok(())
+    open_in_explorer(&dir)
+}
+
+/// 作業フォルダをエクスプローラで開く(docs/requirements.md §3.6)。未設定なら
+/// start_task と同じ既定(data/workspace/<agentId>)を開く — 中間ファイルは
+/// そこに溜まっているため、「未設定です」で断ると確認できない。
+#[tauri::command]
+fn open_work_folder(state: State<AppState>, agent_id: String) -> Result<(), String> {
+    let data_dir = state.data_dir()?;
+    let cfg = config::load_agents_config(data_dir)?;
+    let dir = cfg
+        .agents
+        .get(&agent_id)
+        .and_then(|a| a.work_dir.clone())
+        .unwrap_or_else(|| data_dir.join("workspace").join(&agent_id));
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("作業フォルダを作成できません({}): {e}", dir.display()))?;
+    open_in_explorer(&dir)
 }
 
 /// 監査ログフォルダ(data/logs/)をエクスプローラで開く(docs/roadmap.md v0.6)。
@@ -636,19 +652,18 @@ fn spawn_task_inner(
         })
         .collect();
 
-    // 作業ディレクトリ: agents.json の inputDir の親、無ければ専用ワークスペース
-    // (docs/architecture.md §7.2: ユーザープロファイル直下や無関係なファイルを含む
-    // 親フォルダを作業ディレクトリにしない)。
+    // 作業ディレクトリ: agents.json の workDir、無ければ専用ワークスペース
+    // (docs/architecture.md §7.2)。inputDir/outputDir からは推測しない —
+    // 入力フォルダの親を使うと、入力に Documents を選んだだけでプロファイル直下が
+    // 作業ディレクトリになってしまうため。
     let agents_cfg = config::load_agents_config(&data_dir)?;
-    let working_directory = match agents_cfg.agents.get(&agent_id).and_then(|s| s.input_dir.clone()) {
-        Some(input_dir) => input_dir.parent().map(PathBuf::from).unwrap_or(input_dir),
-        None => {
-            let dir = data_dir.join("workspace").join(&agent_id);
-            std::fs::create_dir_all(&dir)
-                .map_err(|e| format!("ワークスペースフォルダを作成できません({}): {e}", dir.display()))?;
-            dir
-        }
-    };
+    let working_directory = agents_cfg
+        .agents
+        .get(&agent_id)
+        .and_then(|s| s.work_dir.clone())
+        .unwrap_or_else(|| data_dir.join("workspace").join(&agent_id));
+    std::fs::create_dir_all(&working_directory)
+        .map_err(|e| format!("作業フォルダを作成できません({}): {e}", working_directory.display()))?;
 
     // session_model は暫定運用: SDK 側の仕様(CustomAgentConfig.model はセッションモデルへの
     // フォールバック付き上書き)により、エージェント定義の model が実質最優先になる。
@@ -1039,6 +1054,7 @@ fn main() {
             open_update_folder,
             list_history,
             open_output_folder,
+            open_work_folder,
             open_logs_folder,
             start_task,
             reply_task,

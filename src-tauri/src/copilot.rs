@@ -1025,13 +1025,15 @@ fn terminal_outcome_of(ev: &AppEvent) -> Option<(TaskStatus, String)> {
 /// タスク 1 本の実行(Client 起動 → セッション作成 → 購読 → send_and_wait → 後始末)。
 /// sink には変換済み AppEvent を渡すだけで、emit するのは呼び出し側の責務(main.rs)。
 ///
-/// モデルへ送る本文を組み立てる。入出力フォルダが設定されていれば依頼文の前に
-/// [環境情報] として差し込む(依頼文中の「出力フォルダへ保存して」を実パスに解決できる
-/// ようにするため。フォルダ情報はこれ以外の経路ではモデルに一切渡らない)。
+/// モデルへ送る本文を組み立てる。入出力・作業フォルダを依頼文の前に [環境情報] として
+/// 差し込む(依頼文中の「出力フォルダへ保存して」を実パスに解決できるようにするため。
+/// フォルダ情報はこれ以外の経路ではモデルに一切渡らない)。
+/// 作業フォルダはセッションの cwd と同じだが、成果物と中間ファイルを書き分けさせるには
+/// 役割を明示する必要があるので常に載せる(docs/architecture.md §7.2)。
 /// 履歴と TaskStarted.prompt にはユーザーの生の依頼文だけを残すので、この本文は送信専用。
 /// resume(継続依頼)でも毎回付ける: アプリ再起動後に履歴からレジュームしたセッションは
 /// 前回の環境情報をコンテキストに持っていない可能性があるため。
-fn build_message_text(prompt: &str, input_dir: Option<&Path>, output_dir: Option<&Path>) -> String {
+fn build_message_text(prompt: &str, input_dir: Option<&Path>, output_dir: Option<&Path>, work_dir: &Path) -> String {
     let mut lines = Vec::new();
     if let Some(dir) = input_dir {
         lines.push(format!("入力フォルダ(読み取り元): {}", dir.display()));
@@ -1042,9 +1044,10 @@ fn build_message_text(prompt: &str, input_dir: Option<&Path>, output_dir: Option
             dir.display()
         ));
     }
-    if lines.is_empty() {
-        return prompt.to_string();
-    }
+    lines.push(format!(
+        "作業フォルダ: {}(現在の作業ディレクトリ。中間ファイルや書いたスクリプトはここに置くこと)",
+        work_dir.display()
+    ));
     format!("[環境情報]\n{}\n\n[依頼]\n{}", lines.join("\n"), prompt)
 }
 
@@ -1183,8 +1186,12 @@ pub async fn run_task(
     // abort() を呼ばない)。
     let mut permission_abort_requested = false;
 
-    let message_text =
-        build_message_text(&spec.prompt, spec.rules.input_dir.as_deref(), spec.rules.output_dir.as_deref());
+    let message_text = build_message_text(
+        &spec.prompt,
+        spec.rules.input_dir.as_deref(),
+        spec.rules.output_dir.as_deref(),
+        &spec.working_directory,
+    );
     let send_fut = session.send_and_wait(MessageOptions::new(message_text).with_wait_timeout(SEND_AND_WAIT_TIMEOUT));
     tokio::pin!(send_fut);
 
@@ -1578,9 +1585,14 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// 入出力フォルダ未設定でも、作業フォルダ(= cwd)だけは環境情報に載る。
     #[test]
-    fn build_message_text_without_dirs_returns_prompt_as_is() {
-        assert_eq!(build_message_text("集計して", None, None), "集計して");
+    fn build_message_text_without_io_dirs_still_states_work_dir() {
+        let work = PathBuf::from("C:/work/ws");
+        let text = build_message_text("集計して", None, None, &work);
+        assert!(!text.contains("入力フォルダ"));
+        assert!(!text.contains("出力フォルダ"));
+        assert!(text.contains("作業フォルダ: C:/work/ws"));
     }
 
     /// 下書きはコードフェンスや前置き付きで返ってくることがある。
@@ -1617,17 +1629,19 @@ mod tests {
     fn build_message_text_prepends_environment_info() {
         let input = PathBuf::from("C:/work/in");
         let output = PathBuf::from("C:/work/out");
-        let text = build_message_text("集計して", Some(&input), Some(&output));
+        let work = PathBuf::from("C:/work/ws");
+        let text = build_message_text("集計して", Some(&input), Some(&output), &work);
         assert!(text.starts_with("[環境情報]\n"), "環境情報が先頭に付く: {text}");
         assert!(text.contains("入力フォルダ(読み取り元): C:/work/in"));
         assert!(text.contains("出力フォルダ: C:/work/out"));
+        assert!(text.contains("作業フォルダ: C:/work/ws"));
         assert!(text.ends_with("[依頼]\n集計して"), "依頼文は末尾にそのまま残る: {text}");
     }
 
     #[test]
     fn build_message_text_with_output_dir_only() {
         let output = PathBuf::from("C:/work/out");
-        let text = build_message_text("集計して", None, Some(&output));
+        let text = build_message_text("集計して", None, Some(&output), &PathBuf::from("C:/work/ws"));
         assert!(!text.contains("入力フォルダ"));
         assert!(text.contains("出力フォルダ: C:/work/out"));
     }

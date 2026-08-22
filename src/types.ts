@@ -83,6 +83,8 @@ export interface UpdateInfoDto {
 export interface AgentSettings {
   inputDir: string | null;
   outputDir: string | null;
+  /** セッションの作業ディレクトリ。null なら data/workspace/<agentId>。 */
+  workDir: string | null;
   allowedTools: string[];
   deniedTools: string[];
   autoApproveWriteInOutputDir: boolean;

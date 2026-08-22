@@ -569,6 +569,7 @@ export default function App() {
             : {
                 inputDir: null,
                 outputDir: null,
+                workDir: null,
                 allowedTools: [pattern],
                 deniedTools: [],
                 autoApproveWriteInOutputDir: true,
@@ -840,6 +841,17 @@ export default function App() {
     }
   }
 
+  /** 作業フォルダを開く(中間ファイル・生成スクリプトの確認用)。
+   * 未設定でも既定の場所(data/workspace/<agentId>)が開くのでエラーにはならない。 */
+  async function handleOpenWorkFolder(agentId: string, onError: (message: string | null) => void) {
+    onError(null);
+    try {
+      await invoke("open_work_folder", { agentId });
+    } catch (e) {
+      onError(String(e));
+    }
+  }
+
   /** テキストをクリップボードへ(右クリックメニューの「コピー」)。 */
   function copyText(text: string, onError: (message: string | null) => void) {
     onError(null);
@@ -888,6 +900,7 @@ export default function App() {
       { label: "▶ 実行対象に選択", onClick: () => setSelected(a.id) },
       { label: "⚙ 設定を開く", onClick: () => openAgentEditor(a.id, setError) },
       { label: "📂 出力フォルダを開く", onClick: () => handleOpenOutputFolder(a.id, setError) },
+      { label: "🛠 作業フォルダを開く", onClick: () => handleOpenWorkFolder(a.id, setError) },
       {
         label: "⏰ スケジュールを追加",
         onClick: () => {
