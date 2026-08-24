@@ -1,4 +1,6 @@
 import { Fragment, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -259,6 +261,15 @@ function UserInputRowView({
   );
 }
 
+/** エージェントの発言を markdown として整形表示する。生 HTML は react-markdown が既定で無効化する。 */
+function Md({ text }: { text: string }) {
+  return (
+    <div className="md">
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+    </div>
+  );
+}
+
 /** ユーザー側(右)の吹き出し。LINE 同様、時刻は吹き出しの左下に出す。 */
 function UserBubble({ text, time }: { text: string; time?: string | null }) {
   return (
@@ -325,7 +336,7 @@ function AgentRowView({
     !row.currentIntent && row.tools.length === 0 && !row.error && row.status !== "running";
   return (
     <AgentMessage name={row.label} status={row.status} sub={isSub} meta={meta}>
-      {row.currentIntent && <p>{row.currentIntent}</p>}
+      {row.currentIntent && <Md text={row.currentIntent} />}
       {row.status === "running" && (
         <span className="typing" role="status" aria-label="作業中">
           <i />
@@ -1487,10 +1498,7 @@ export default function App() {
               <Fragment key={i}>
                 <UserBubble text={t.prompt ?? "(依頼内容は記録されていません)"} time={bubbleTime(t.startedAt)} />
                 <AgentMessage name={activeSession.agentId || "?"} meta={STATUS_LABEL[t.status]}>
-                  <p>
-                    {t.status === "completed" ? "✅" : t.status === "failed" ? "❌" : "⏹"}{" "}
-                    {t.summary ?? "(結果なし)"}
-                  </p>
+                  {t.summary ? <Md text={t.summary} /> : <p>(結果なし)</p>}
                 </AgentMessage>
               </Fragment>
             ))}
@@ -1517,8 +1525,8 @@ export default function App() {
               </>
             )}
             {tree.taskStatus === "completed" && tree.summary && (
-              <AgentMessage name={tree.main?.label ?? activeSession.agentId ?? "?"}>
-                <p>✅ {tree.summary}</p>
+              <AgentMessage name={tree.main?.label ?? activeSession.agentId ?? "?"} meta={STATUS_LABEL.completed}>
+                <Md text={tree.summary} />
               </AgentMessage>
             )}
             {/* 送信済みの追い返信(taskStarted 受信までの仮表示)。実イベントが届いたら

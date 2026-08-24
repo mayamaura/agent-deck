@@ -556,6 +556,83 @@ input[type="radio"] {
   border-radius: 14px 4px 14px 14px;
 }
 
+/* エージェント発言の markdown 表示。吹き出しの pre-wrap のままだと
+   markdown ソースの改行まで表示されて二重改行になるため通常折返しへ戻す。 */
+.chat-bubble .md {
+  white-space: normal;
+}
+.chat-bubble .md p,
+.chat-bubble .md ul,
+.chat-bubble .md ol,
+.chat-bubble .md pre,
+.chat-bubble .md table,
+.chat-bubble .md blockquote,
+.chat-bubble .md h1,
+.chat-bubble .md h2,
+.chat-bubble .md h3,
+.chat-bubble .md h4,
+.chat-bubble .md h5,
+.chat-bubble .md h6 {
+  margin: 6px 0;
+}
+.chat-bubble .md > :first-child {
+  margin-top: 0;
+}
+.chat-bubble .md > :last-child {
+  margin-bottom: 0;
+}
+/* 見出しは吹き出し内で巨大化させない(本文 13px 基準の情報密度を維持)。 */
+.chat-bubble .md h1,
+.chat-bubble .md h2,
+.chat-bubble .md h3,
+.chat-bubble .md h4,
+.chat-bubble .md h5,
+.chat-bubble .md h6 {
+  font-size: 1.05em;
+}
+.chat-bubble .md ul,
+.chat-bubble .md ol {
+  padding-left: 20px;
+}
+.chat-bubble .md code {
+  font-family: var(--mono);
+  font-size: 0.95em;
+  padding: 1px 4px;
+  background: var(--panel-2);
+  border-radius: 4px;
+}
+.chat-bubble .md pre {
+  overflow-x: auto;
+  padding: 8px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.chat-bubble .md pre code {
+  padding: 0;
+  background: none;
+}
+.chat-bubble .md table {
+  border-collapse: collapse;
+}
+.chat-bubble .md th,
+.chat-bubble .md td {
+  padding: 3px 8px;
+  border: 1px solid var(--line-strong);
+}
+.chat-bubble .md blockquote {
+  padding-left: 10px;
+  border-left: 3px solid var(--line-strong);
+  color: var(--text-dim);
+}
+.chat-bubble .md a {
+  color: var(--accent);
+}
+.chat-bubble .md hr {
+  border: none;
+  border-top: 1px solid var(--line);
+}
+
 /* 吹き出し脇の時刻・状態表示(LINE の既読/時刻の位置)。 */
 .chat-meta {
   flex: none;
