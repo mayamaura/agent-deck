@@ -38,6 +38,48 @@ describe("splitAbsPaths(地の文の絶対パス)", () => {
     expect(splitAbsPaths("output/report.md に保存しました")).toBeNull();
     expect(splitAbsPaths("処理が完了しました")).toBeNull();
   });
+
+  const hrefOf = (input: string, index = 1) => {
+    const parts = splitAbsPaths(input);
+    return parts ? ((parts[index] as Element).properties?.href ?? null) : null;
+  };
+
+  it("空白を含むパス: 区切りを含む語まで橋渡しして繋げる", () => {
+    expect(hrefOf("インストール先は C:\\Program Files (x86)\\App\\readme.txt を確認")).toBe(
+      "C:\\Program Files (x86)\\App\\readme.txt",
+    );
+    expect(hrefOf("C:\\新しい フォルダ\\report.md に保存しました", 0)).toBe(
+      "C:\\新しい フォルダ\\report.md",
+    );
+  });
+
+  it("空白を含むパス: 拡張子付きの語は直後 1 語だけ繋げる", () => {
+    expect(hrefOf("結果は C:\\out\\my report.md を確認")).toBe("C:\\out\\my report.md");
+  });
+
+  it("空白を含むパス: 引用符囲みは丸ごとパスとして扱う", () => {
+    expect(hrefOf("設定は「C:\\My Documents」にあります")).toBe("C:\\My Documents");
+  });
+
+  it("和文の助詞を跨いで別のパスと誤結合しない", () => {
+    const parts = splitAbsPaths("C:\\out から output\\x.md を作成しました");
+    expect((parts![0] as Element).properties?.href).toBe("C:\\out");
+    expect(parts).toHaveLength(2); // 相対パス側はリンク化しない
+  });
+
+  it("英文の続きを飲み込まない", () => {
+    expect(hrefOf("moved C:\\out to a safe place")).toBe("C:\\out");
+  });
+
+  it("連続する 2 つの絶対パスを別々にリンク化する", () => {
+    const parts = splitAbsPaths("C:\\out と D:\\data\\x.md を比較");
+    const hrefs = parts!.filter((p) => p.type === "element").map((p) => (p as Element).properties?.href);
+    expect(hrefs).toEqual(["C:\\out", "D:\\data\\x.md"]);
+  });
+
+  it("空白なしで和文が続く場合は拡張子の直後で切る", () => {
+    expect(hrefOf("C:\\出力\\レポート.mdに保存しました。", 0)).toBe("C:\\出力\\レポート.md");
+  });
 });
 
 describe("rehypeLinkifyPaths(hast 変換)", () => {
