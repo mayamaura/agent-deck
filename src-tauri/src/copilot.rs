@@ -1057,6 +1057,12 @@ fn build_message_text(prompt: &str, input_dir: Option<&Path>, output_dir: Option
             work_dir.display()
         ));
     }
+    // 返信中のパスは UI がリンク化してクリックで開けるようにしている(src/mdLinks.ts)。
+    // 空白を含むパスは裸だと終端が判定できないため、囲んで書くようモデルに毎回指示する。
+    lines.push(
+        "ファイルやフォルダのパスに言及するときは、必ず `C:\\out\\report.md` のようにバッククォートで囲むこと"
+            .to_string(),
+    );
     format!("[環境情報]\n{}\n\n[依頼]\n{}", lines.join("\n"), prompt)
 }
 
@@ -1602,6 +1608,13 @@ mod tests {
         assert!(!text.contains("入力フォルダ"));
         assert!(!text.contains("出力フォルダ"));
         assert!(text.contains("作業フォルダ: C:/work/ws"));
+    }
+
+    /// パスをバッククォートで囲む表記指示が毎回付く(UI のリンク化を確実にするため)。
+    #[test]
+    fn build_message_text_always_instructs_backquoted_paths() {
+        let text = build_message_text("集計して", None, None, &PathBuf::from("C:/work/ws"));
+        assert!(text.contains("バッククォートで囲むこと"), "表記指示が載る: {text}");
     }
 
     /// 下書きはコードフェンスや前置き付きで返ってくることがある。
