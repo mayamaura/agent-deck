@@ -489,9 +489,11 @@ fn default_workspace(data_dir: &Path, agent_id: &str) -> PathBuf {
 }
 
 /// Windows 専用アプリなので explorer を直接呼ぶ(プラグイン不要)。
-fn open_in_explorer(dir: &Path) -> Result<(), String> {
+/// フォルダはエクスプローラ、ファイルは関連付けアプリ(ダブルクリック相当)、
+/// URL は既定ブラウザで開く。
+fn open_in_explorer(target: &Path) -> Result<(), String> {
     std::process::Command::new("explorer")
-        .arg(dir)
+        .arg(target)
         .spawn()
         .map_err(|e| format!("エクスプローラを起動できません: {e}"))?;
     Ok(())
@@ -545,6 +547,53 @@ fn open_output_folder(state: State<AppState>, agent_id: String) -> Result<(), St
 #[tauri::command]
 fn open_work_folder(state: State<AppState>, agent_id: String) -> Result<(), String> {
     open_agent_dir(state, &agent_id, |a| a.work_dir.clone())
+}
+
+/// チャット本文中のリンクを開く(URL は既定ブラウザ、ファイルパスは関連付けアプリ)。
+/// 相対パスはセッションの cwd と同じ規則(workDir、未設定なら既定ワークスペース。
+/// spawn_task_inner 参照)で作業フォルダ基準に解決する。
+/// エージェントのフォルダ(入力・出力・作業・既定ワークスペース)の外にあるファイルは
+/// 直接開かず、エクスプローラでの選択表示に留める — 本文は AI が書くため、クリック
+/// 一発で任意の実行ファイルが起動する経路を作らない。配下判定は permissions::is_within
+/// (正規化済み絶対パス)で行う。
+#[tauri::command]
+fn open_chat_link(state: State<AppState>, agent_id: String, target: String) -> Result<(), String> {
+    if target.starts_with("http://") || target.starts_with("https://") {
+        // explorer に URL を渡すと既定ブラウザが開く(open_in_explorer と同じ Windows 専用の流儀)
+        return open_in_explorer(Path::new(&target));
+    }
+    let data_dir = state.data_dir()?;
+    let settings = config::load_agents_config(data_dir)?
+        .agents
+        .get(&agent_id)
+        .cloned()
+        .unwrap_or_default();
+    let default_ws = default_workspace(data_dir, &agent_id);
+    let work = settings.work_dir.clone().unwrap_or_else(|| default_ws.clone());
+    let path = Path::new(&target);
+    let resolved = if path.is_absolute() { path.to_path_buf() } else { work.join(path) };
+    if !resolved.exists() {
+        return Err(format!("ファイルが見つかりません: {}", resolved.display()));
+    }
+    if resolved.is_dir() {
+        return open_in_explorer(&resolved);
+    }
+    let roots = [
+        settings.input_dir.as_deref(),
+        settings.output_dir.as_deref(),
+        Some(work.as_path()),
+        Some(default_ws.as_path()),
+    ];
+    if roots.iter().flatten().any(|root| permissions::is_within(root, &resolved)) {
+        // explorer にファイルパスを渡すとダブルクリック相当(関連付けアプリで開く)
+        open_in_explorer(&resolved)
+    } else {
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", resolved.display()))
+            .spawn()
+            .map_err(|e| format!("エクスプローラを起動できません: {e}"))?;
+        Ok(())
+    }
 }
 
 /// 監査ログフォルダ(data/logs/)をエクスプローラで開く(docs/roadmap.md v0.6)。
@@ -1070,6 +1119,7 @@ fn main() {
             list_history,
             open_output_folder,
             open_work_folder,
+            open_chat_link,
             open_logs_folder,
             start_task,
             reply_task,

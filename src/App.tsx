@@ -21,6 +21,7 @@ import { EVENT_CHANNEL } from "./types";
 import { buildTree } from "./tree";
 import type { AgentRow, TreeState } from "./tree";
 import { sessionSummary } from "./sessions";
+import { rehypeLinkifyPaths } from "./mdLinks";
 import { AGENTS_CHANGED } from "./AgentEditor";
 import { useContextMenu } from "./contextMenu";
 import type { MenuItem } from "./contextMenu";
@@ -261,11 +262,40 @@ function UserInputRowView({
   );
 }
 
-/** エージェントの発言を markdown として整形表示する。生 HTML は react-markdown が既定で無効化する。 */
-function Md({ text }: { text: string }) {
+/**
+ * エージェントの発言を markdown として整形表示する。生 HTML は react-markdown が既定で無効化する。
+ * 本文中のリンク(URL・ファイルパス。パスは rehypeLinkifyPaths が検出)はクリックで
+ * Rust の open_chat_link に渡す — URL は既定ブラウザ、相対パスは作業フォルダ基準で解決して開く。
+ * agentId は相対パスの基準(作業フォルダ)を引くために必要。
+ */
+function Md({ text, agentId }: { text: string; agentId: string }) {
+  const [linkError, setLinkError] = useState<string | null>(null);
   return (
     <div className="md">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeLinkifyPaths]}
+        components={{
+          a: ({ href, children }) => (
+            <a
+              href={href}
+              title={href}
+              onClick={(e) => {
+                e.preventDefault();
+                setLinkError(null);
+                invoke("open_chat_link", { agentId, target: href ?? "" }).catch((err) =>
+                  setLinkError(String(err)),
+                );
+              }}
+            >
+              {children}
+            </a>
+          ),
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+      {linkError && <p className="error">⚠ {linkError}</p>}
     </div>
   );
 }
@@ -313,12 +343,15 @@ function AgentMessage({
 
 function AgentRowView({
   row,
+  agentId,
   elapsedMs,
   isSub,
   onRespond,
   onRespondUserInput,
 }: {
   row: AgentRow;
+  /** 発言中のパスリンクを作業フォルダ基準で解決するためのエージェント ID */
+  agentId: string;
   elapsedMs: number | null;
   isSub: boolean;
   onRespond: (requestId: string, decision: PermissionDecision) => void;
@@ -336,7 +369,7 @@ function AgentRowView({
     !row.currentIntent && row.tools.length === 0 && !row.error && row.status !== "running";
   return (
     <AgentMessage name={row.label} status={row.status} sub={isSub} meta={meta}>
-      {row.currentIntent && <Md text={row.currentIntent} />}
+      {row.currentIntent && <Md text={row.currentIntent} agentId={agentId} />}
       {row.status === "running" && (
         <span className="typing" role="status" aria-label="作業中">
           <i />
@@ -1498,7 +1531,7 @@ export default function App() {
               <Fragment key={i}>
                 <UserBubble text={t.prompt ?? "(依頼内容は記録されていません)"} time={bubbleTime(t.startedAt)} />
                 <AgentMessage name={activeSession.agentId || "?"} meta={STATUS_LABEL[t.status]}>
-                  {t.summary ? <Md text={t.summary} /> : <p>(結果なし)</p>}
+                  {t.summary ? <Md text={t.summary} agentId={activeSession.agentId ?? ""} /> : <p>(結果なし)</p>}
                 </AgentMessage>
               </Fragment>
             ))}
@@ -1507,6 +1540,7 @@ export default function App() {
               <>
                 <AgentRowView
                   row={tree.main}
+                  agentId={activeSession.agentId ?? ""}
                   elapsedMs={elapsedMsFor(tree.main, activeSession.rowStartedAt, nowTick)}
                   isSub={false}
                   onRespond={respondPermission}
@@ -1516,6 +1550,7 @@ export default function App() {
                   <AgentRowView
                     key={sub.key}
                     row={sub}
+                    agentId={activeSession.agentId ?? ""}
                     elapsedMs={elapsedMsFor(sub, activeSession.rowStartedAt, nowTick)}
                     isSub
                     onRespond={respondPermission}
@@ -1526,7 +1561,7 @@ export default function App() {
             )}
             {tree.taskStatus === "completed" && tree.summary && (
               <AgentMessage name={tree.main?.label ?? activeSession.agentId ?? "?"} meta={STATUS_LABEL.completed}>
-                <Md text={tree.summary} />
+                <Md text={tree.summary} agentId={activeSession.agentId ?? ""} />
               </AgentMessage>
             )}
             {/* 送信済みの追い返信(taskStarted 受信までの仮表示)。実イベントが届いたら
