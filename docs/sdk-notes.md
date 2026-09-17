@@ -118,7 +118,17 @@ session.background_tasks_changed
 - **サブエージェント委任は自動**: ランタイムがプロンプトと各エージェントの name/description を
   照合して委任する。`infer: false` で自動委任の対象外にできる
 - `SessionConfig::with_working_directory(dir)` で作業ディレクトリ指定(architecture.md §7.2 用)。
-  `with_model(...)` でセッションモデル指定(エージェント側 `model` は親モデルへのフォールバック付き上書き)
+  `with_model(...)` でセッションモデル指定
+- **実機検証(2026-09-17、CLI 1.0.9、`cargo run --bin model_verify` で確認、バイナリは検証後に削除):
+  `CustomAgentConfig.model` は無視される。** ドキュメント上のコメントは「親セッションモデルへの
+  フォールバック付き上書き」と書かれているが、実際には
+  `with_agent(name)` で選択したカスタムエージェントに `with_model("gpt-5.6-luna")` を設定しても
+  `session.model_change` は常に `claude-sonnet-5`(未指定時の SDK 既定)になった。
+  同じモデル ID を `SessionConfig::with_model("gpt-5.6-luna")`(セッション全体)に設定すると
+  正しく `gpt-5.6-luna` で応答した。**エージェントごとにモデルを変えたいなら、選択中の
+  エージェントの model は `SessionConfig::with_model` 経由で渡すしかない**(agent-deck は
+  main.rs でこの解決をしてから `TaskSpec.session_model` に詰めている)。選択されていない
+  委任候補エージェントの個別モデル指定は現状のSDKでは反映する手段がない
 
 ### ツール制限
 

@@ -19,6 +19,12 @@
 
 ## 決定ログ
 
+- 2026-09-17: #3 の実装をSDK実機検証に合わせて修正(ユーザー報告のバグ修正)。優先順位
+  (エージェント定義 model > アプリ defaultModel > SDK 既定)自体は変えないが、伝達経路を
+  `CustomAgentConfig.model` から `SessionConfig.model`(= `TaskSpec.session_model`)に変更。
+  実機検証で `CustomAgentConfig.model` が無視され、常に SDK 既定(claude-sonnet-5)で実行される
+  不具合を確認したため。詳細は docs/sdk-notes.md「カスタムエージェント」節
+
 - 2026-08-16: #9 の置き場を `.agent.md` frontmatter に決定(ユーザー決定)。共有フォルダ同期で
   そのまま配れること、CLI 単体では未知キーとして無視され互換性を壊さないことが理由。
   着手時は先に `render_agent_md`(未知キーを落とす)を直すこと

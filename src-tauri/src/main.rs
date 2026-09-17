@@ -690,11 +690,12 @@ fn spawn_task_inner(
     let agent_name = selected.name.clone();
     let agent_source_path = selected.source_path.clone();
     let agent_scope = selected.scope;
-    let model_for_provenance = selected
-        .model
-        .clone()
-        .or_else(|| cfg.default_model.clone())
-        .unwrap_or_else(|| "(SDK 既定)".to_string());
+    // エージェント定義の model > アプリの defaultModel > SDK 既定(docs/open-questions.md #3)。
+    // 実機検証(2026-09-17、SDK 1.0.9): CustomAgentConfig.model は無視され、実際に反映されるのは
+    // SessionConfig::with_model(セッション全体)だけ(docs/sdk-notes.md「カスタムエージェント」節)。
+    // そのためここで解決した値は TaskSpec.session_model に渡し、CustomAgentConfig 側には委ねない。
+    let resolved_model = selected.model.clone().or_else(|| cfg.default_model.clone());
+    let model_for_provenance = resolved_model.clone().unwrap_or_else(|| "(SDK 既定)".to_string());
     let agent_specs: Vec<copilot::AgentSpec> = definitions
         .iter()
         .map(|d| copilot::AgentSpec {
@@ -721,10 +722,6 @@ fn spawn_task_inner(
     std::fs::create_dir_all(&working_directory)
         .map_err(|e| format!("作業フォルダを作成できません({}): {e}", working_directory.display()))?;
 
-    // session_model は暫定運用: SDK 側の仕様(CustomAgentConfig.model はセッションモデルへの
-    // フォールバック付き上書き)により、エージェント定義の model が実質最優先になる。
-    // ここで渡す config.defaultModel はその親(フォールバック先)。優先順位の明文化は
-    // docs/open-questions.md #3 が未決のため、確定させない(暫定コメントとして残す)。
     // rules は agents.json の該当エージェント設定から構成する。未設定なら既定
     // (allowed/denied 空、output_dir 無し、auto_approve true。docs/architecture.md §7.1)。
     let mut rules = agents_cfg.agents.get(&agent_id).cloned().unwrap_or_default();
@@ -755,7 +752,7 @@ fn spawn_task_inner(
         agents: agent_specs,
         selected_agent_name: selected.name,
         working_directory,
-        session_model: cfg.default_model.clone(),
+        session_model: resolved_model,
         rules,
         bridge: state.bridge.clone(),
         user_input_bridge: state.user_input_bridge.clone(),

@@ -43,6 +43,13 @@ pub struct AgentSpec {
 }
 
 /// AgentSpec → CustomAgentConfig。SDK 型はこの関数の戻り値としてのみこのモジュール内に留まる。
+///
+/// **実機検証(2026-09-17、SDK 1.0.9、bin/model_verify.rs で確認): ここで設定する `model` は
+/// 無視される。** ドキュメント上は「セッションモデルへのフォールバック付き上書き」とあるが、
+/// 実際には常にセッションモデル(未指定なら SDK 既定)が使われた。選択中のエージェントの
+/// model は main.rs が `TaskSpec.session_model`(`SessionConfig::with_model`)として渡すことで
+/// 反映させている。ここは委任候補(選択されていないエージェント)の model 指定であり、SDK が
+/// 直れば効くようになる可能性があるため呼び出し自体は残す。
 fn to_custom_agent_config(spec: &AgentSpec) -> CustomAgentConfig {
     let mut config =
         CustomAgentConfig::new(spec.name.clone(), spec.prompt.clone()).with_description(spec.description.clone());
@@ -68,7 +75,9 @@ pub struct TaskSpec {
     /// with_agent に渡す name(agents 内のいずれかの name と一致すること)。
     pub selected_agent_name: String,
     pub working_directory: PathBuf,
-    /// config.defaultModel。None なら SDK 既定に委ねる。
+    /// 実際に SDK へ渡すモデル(エージェント定義の model > config.defaultModel、main.rs で解決済み)。
+    /// `SessionConfig::with_model` に渡る唯一のモデル指定経路(実機検証の結果、
+    /// `CustomAgentConfig.model` は無視されるため)。None なら SDK 既定に委ねる。
     pub session_model: Option<String>,
     /// このエージェントの入出力設定・許可/拒否ツール(docs/architecture.md §7.1)。
     pub rules: permissions::PermissionRules,
