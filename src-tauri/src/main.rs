@@ -489,13 +489,64 @@ fn default_workspace(data_dir: &Path, agent_id: &str) -> PathBuf {
 }
 
 /// Windows 専用アプリなので explorer を直接呼ぶ(プラグイン不要)。
-/// フォルダはエクスプローラ、ファイルは関連付けアプリ(ダブルクリック相当)、
-/// URL は既定ブラウザで開く。
+/// フォルダをエクスプローラで開く、または URL を既定ブラウザで開く用途のみに使う。
+/// ファイルパスを渡してもダブルクリック相当にはならず、親フォルダが開くだけ
+/// (explorer.exe の既知の挙動)なので、ファイルを開くには open_file_with_default_app を使う。
 fn open_in_explorer(target: &Path) -> Result<(), String> {
     std::process::Command::new("explorer")
         .arg(target)
         .spawn()
         .map_err(|e| format!("エクスプローラを起動できません: {e}"))?;
+    Ok(())
+}
+
+/// ファイルを既定の関連付けアプリで開く(ダブルクリック相当)。
+/// `cmd /c start` は関連付けが無いファイルで親フォルダを開いてしまう固有のフォールバックを
+/// 持つため(実機検証で確認済み。.md など未関連付けの拡張子で発生し、当初これで
+/// バグを再現できなかった)使わず、ShellExecuteW を直接叩く(プラグイン不要、crates.io
+/// への依存追加なし)。関連付けが無い場合(戻り値 <= 32、代表的には SE_ERR_NOASSOC=31)は
+/// 「プログラムから開く」ダイアログ(OpenAs_RunDLL、ダブルクリック時と同じダイアログ)を出す。
+fn open_file_with_default_app(target: &Path) -> Result<(), String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "shell32")]
+    extern "system" {
+        fn ShellExecuteW(
+            hwnd: *mut std::ffi::c_void,
+            operation: *const u16,
+            file: *const u16,
+            parameters: *const u16,
+            directory: *const u16,
+            show_cmd: i32,
+        ) -> isize;
+    }
+
+    fn wide(s: &OsStr) -> Vec<u16> {
+        s.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    const SW_SHOWNORMAL: i32 = 1;
+    let operation = wide(OsStr::new("open"));
+    let file = wide(target.as_os_str());
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if result > 32 {
+        return Ok(());
+    }
+    std::process::Command::new("rundll32")
+        .arg("shell32.dll,OpenAs_RunDLL")
+        .arg(target)
+        .spawn()
+        .map_err(|e| format!("開くアプリを選択できません: {e}"))?;
     Ok(())
 }
 
@@ -562,6 +613,11 @@ fn open_chat_link(state: State<AppState>, agent_id: String, target: String) -> R
         // explorer に URL を渡すと既定ブラウザが開く(open_in_explorer と同じ Windows 専用の流儀)
         return open_in_explorer(Path::new(&target));
     }
+    // 空パスは work.join("") = 作業フォルダに化けて「押すと作業フォルダが開く」になるため弾く
+    // (フロントの sanitize で href が空になる経路がある。src/mdLinks.ts の chatUrlTransform 参照)
+    if target.trim().is_empty() {
+        return Err("リンク先が空です".into());
+    }
     let data_dir = state.data_dir()?;
     let settings = config::load_agents_config(data_dir)?
         .agents
@@ -585,8 +641,7 @@ fn open_chat_link(state: State<AppState>, agent_id: String, target: String) -> R
         Some(default_ws.as_path()),
     ];
     if roots.iter().flatten().any(|root| permissions::is_within(root, &resolved)) {
-        // explorer にファイルパスを渡すとダブルクリック相当(関連付けアプリで開く)
-        open_in_explorer(&resolved)
+        open_file_with_default_app(&resolved)
     } else {
         std::process::Command::new("explorer")
             .arg(format!("/select,{}", resolved.display()))

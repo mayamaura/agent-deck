@@ -1,4 +1,5 @@
 import { visit } from "unist-util-visit";
+import { defaultUrlTransform } from "react-markdown";
 import type { Element, ElementContent, Root } from "hast";
 
 /**
@@ -122,6 +123,16 @@ export function splitAbsPaths(value: string): ElementContent[] | null {
   if (out.length === 0) return null;
   if (last < value.length) out.push({ type: "text", value: value.slice(last) });
   return out;
+}
+
+/**
+ * react-markdown の既定サニタイザは `C:\out\report.md` の `C:` を未知のプロトコルとみなし
+ * href を空文字にしてしまう(空の href は Rust 側で作業フォルダに解決され、
+ * 「リンクを押すと作業フォルダが開く」不具合になっていた)。Windows の絶対パスだけ素通しし、
+ * それ以外(javascript: 等)は既定どおり落とす。
+ */
+export function chatUrlTransform(url: string): string {
+  return /^(?:[A-Za-z]:[\\/]|\\\\)/.test(url) ? url : defaultUrlTransform(url);
 }
 
 export function rehypeLinkifyPaths() {

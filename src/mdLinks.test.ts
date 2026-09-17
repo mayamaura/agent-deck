@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Element, Root, Text } from "hast";
-import { looksLikePath, rehypeLinkifyPaths, splitAbsPaths } from "./mdLinks";
+import { chatUrlTransform, looksLikePath, rehypeLinkifyPaths, splitAbsPaths } from "./mdLinks";
 
 describe("looksLikePath(インラインコード判定)", () => {
   it("絶対パス・相対パス・拡張子付きファイル名を認める", () => {
@@ -111,5 +111,35 @@ describe("rehypeLinkifyPaths(hast 変換)", () => {
     const tree: Root = { type: "root", children: [el("p", [a])] };
     rehypeLinkifyPaths()(tree);
     expect(a.children[0].type).toBe("text");
+  });
+});
+
+describe("react-markdown の描画結果", () => {
+  it("Windows 絶対パスが href に残る(既定 sanitize だと空文字になり作業フォルダが開いていた)", async () => {
+    const { createElement } = await import("react");
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const ReactMarkdown = (await import("react-markdown")).default;
+    const html = renderToStaticMarkup(
+      createElement(ReactMarkdown, {
+        rehypePlugins: [rehypeLinkifyPaths],
+        urlTransform: chatUrlTransform,
+        children: "レポートを作成しました。\n\nC:\\out\\report.md",
+      }),
+    );
+    expect(html).toContain('href="C:\\out\\report.md"');
+  });
+});
+
+describe("chatUrlTransform", () => {
+  it("Windows 絶対パスは潰さない(既定 sanitize は空文字にしてしまう)", () => {
+    expect(chatUrlTransform("C:\\out\\report.md")).toBe("C:\\out\\report.md");
+    expect(chatUrlTransform("C:/out/report.md")).toBe("C:/out/report.md");
+    expect(chatUrlTransform("\\\\server\\share\\report.md")).toBe("\\\\server\\share\\report.md");
+  });
+
+  it("相対パスと http(s) はそのまま、危険なスキームは落とす", () => {
+    expect(chatUrlTransform("output/report.md")).toBe("output/report.md");
+    expect(chatUrlTransform("https://example.com/x")).toBe("https://example.com/x");
+    expect(chatUrlTransform("javascript:alert(1)")).toBe("");
   });
 });

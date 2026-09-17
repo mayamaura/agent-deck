@@ -21,7 +21,7 @@ import { EVENT_CHANNEL } from "./types";
 import { buildTree } from "./tree";
 import type { AgentRow, TreeState } from "./tree";
 import { sessionSummary } from "./sessions";
-import { rehypeLinkifyPaths } from "./mdLinks";
+import { chatUrlTransform, rehypeLinkifyPaths } from "./mdLinks";
 import { AGENTS_CHANGED } from "./AgentEditor";
 import { useContextMenu } from "./contextMenu";
 import type { MenuItem } from "./contextMenu";
@@ -277,6 +277,7 @@ function Md({ text, agentId }: { text: string; agentId: string }) {
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeLinkifyPaths]}
+        urlTransform={chatUrlTransform}
         components={{
           a: ({ href, children }) => (
             <a
