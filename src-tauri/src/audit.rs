@@ -222,6 +222,7 @@ mod tests {
                 agent_id: "writer".to_string(),
                 started_at: "2026-08-12T00:00:00Z".to_string(),
                 prompt: "レポートを書いて".to_string(),
+                model: None,
             },
         );
         writer.record_permission(

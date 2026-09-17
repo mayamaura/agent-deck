@@ -290,6 +290,7 @@ fn event_session_id(ev: &AppEvent) -> &str {
         | AppEvent::TaskFailed { session_id, .. }
         | AppEvent::AllowRuleAdded { session_id, .. }
         | AppEvent::UserInputRequested { session_id, .. }
+        | AppEvent::ModelChanged { session_id, .. }
         | AppEvent::TaskCancelled { session_id } => session_id.as_str(),
     }
 }

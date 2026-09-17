@@ -130,7 +130,7 @@ export interface QueueStatusDto {
 
 // src-tauri/src/events.rs AppEvent(kind でタグ付けされた単一チャネル "agent://event")
 export type AppEvent =
-  | { kind: "taskStarted"; sessionId: string; agentId: string; startedAt: string; prompt: string }
+  | { kind: "taskStarted"; sessionId: string; agentId: string; startedAt: string; prompt: string; model: string | null }
   | { kind: "agentIntent"; sessionId: string; agentId: string | null; text: string }
   | { kind: "subagentStarted"; sessionId: string; agentId: string; toolCallId: string; displayName: string }
   | { kind: "subagentCompleted"; sessionId: string; agentId: string; toolCallId: string; durationMs: number; totalTokens: number | null }
@@ -143,6 +143,7 @@ export type AppEvent =
   | { kind: "taskFailed"; sessionId: string; error: string }
   | { kind: "taskCancelled"; sessionId: string }
   | { kind: "allowRuleAdded"; sessionId: string; agentId: string | null; pattern: string }
-  | { kind: "userInputRequested"; sessionId: string; requestId: string; question: string; choices: string[]; allowFreeform: boolean };
+  | { kind: "userInputRequested"; sessionId: string; requestId: string; question: string; choices: string[]; allowFreeform: boolean }
+  | { kind: "modelChanged"; sessionId: string; model: string };
 
 export const EVENT_CHANNEL = "agent://event";

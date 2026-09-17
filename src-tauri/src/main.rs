@@ -888,6 +888,7 @@ fn spawn_task_inner(
                         agent_id: agent_id.clone(),
                         started_at: copilot::format_rfc3339_now(),
                         prompt: prompt_for_history.clone(),
+                        model: None,
                     },
                     events::AppEvent::TaskFailed {
                         session_id: sid,

@@ -13,9 +13,9 @@ use github_copilot_sdk::handler::{
 };
 use github_copilot_sdk::rpc::ModelPolicyState;
 use github_copilot_sdk::session_events::{
-    AssistantIntentData, AssistantMessageData, AssistantUsageData, SessionErrorData,
-    SessionIdleData, SessionUsageInfoData, SubagentCompletedData, SubagentFailedData,
-    SubagentStartedData, ToolExecutionCompleteData, ToolExecutionStartData,
+    AssistantIntentData, AssistantMessageData, AssistantUsageData, ModelCallStartData,
+    SessionErrorData, SessionIdleData, SessionUsageInfoData, SubagentCompletedData,
+    SubagentFailedData, SubagentStartedData, ToolExecutionCompleteData, ToolExecutionStartData,
 };
 use github_copilot_sdk::types::{
     CustomAgentConfig, MessageOptions, PermissionRequestData, PermissionRequestKind, RequestId,
@@ -748,8 +748,25 @@ impl EventContext {
             "assistant.message" => self.on_assistant_message(ev),
             "session.idle" => self.on_session_idle(ev),
             "session.error" => self.on_session_error(ev),
+            "model.call_start" => self.on_model_call_start(ev),
             _ => Vec::new(),
         }
+    }
+
+    /// 実際に使われているモデルの裏取り手段(docs/sdk-notes.md「カスタムエージェント」節:
+    /// CustomAgentConfig.model は無視されるため、SDK が実際に選んだモデルはこのイベントでしか分からない)。
+    /// `session.model_change` ではなくこちらを使う理由: 実機検証で
+    /// `session.model_change` は CLI が前回セッションと同じモデルを記憶している場合に
+    /// 発火しないことを確認した。`model.call_start` は実際のモデル呼び出しのたびに
+    /// 必ず発生するため、こちらを唯一の情報源にする。
+    fn on_model_call_start(&self, ev: &SessionEvent) -> Vec<AppEvent> {
+        let Some(data) = ev.typed_data::<ModelCallStartData>() else {
+            return Vec::new();
+        };
+        let Some(model) = data.model else {
+            return Vec::new();
+        };
+        vec![AppEvent::ModelChanged { session_id: self.session_id.clone(), model }]
     }
 
     fn on_assistant_intent(&self, ev: &SessionEvent) -> Vec<AppEvent> {
@@ -1189,6 +1206,7 @@ pub async fn run_task(
         agent_id: spec.agent_id,
         started_at: started_at.clone(),
         prompt: spec.prompt.clone(),
+        model: spec.session_model.clone(),
     };
     audit.record_event(&session_id, &task_started_event);
     sink(task_started_event);

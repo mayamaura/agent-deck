@@ -121,6 +121,8 @@ function summarize(ev: AppEvent): string {
       return `常に許可を登録しました: ${ev.pattern}`;
     case "userInputRequested":
       return `質問: ${ev.question}`;
+    case "modelChanged":
+      return `使用モデル: ${ev.model}`;
   }
 }
 
@@ -346,6 +348,7 @@ function AgentRowView({
   agentId,
   elapsedMs,
   isSub,
+  model,
   onRespond,
   onRespondUserInput,
 }: {
@@ -354,6 +357,8 @@ function AgentRowView({
   agentId: string;
   elapsedMs: number | null;
   isSub: boolean;
+  /** 実行中のモデル(メイン行のみ表示。サブ行は常に未指定)。 */
+  model?: string | null;
   onRespond: (requestId: string, decision: PermissionDecision) => void;
   onRespondUserInput: (requestId: string, answer: string | null) => void;
 }) {
@@ -362,6 +367,7 @@ function AgentRowView({
     STATUS_LABEL[row.status],
     elapsedMs != null ? formatDuration(elapsedMs) : null,
     row.status !== "running" && row.totalTokens != null ? `${row.totalTokens} tokens` : null,
+    model,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -1062,6 +1068,7 @@ export default function App() {
         agentId: h.agentId,
         startedAt: h.startedAt,
         prompt: h.prompt,
+        model: null,
       };
       const terminal: AppEvent =
         h.status === "completed"
@@ -1543,6 +1550,7 @@ export default function App() {
                   agentId={activeSession.agentId ?? ""}
                   elapsedMs={elapsedMsFor(tree.main, activeSession.rowStartedAt, nowTick)}
                   isSub={false}
+                  model={tree.model}
                   onRespond={respondPermission}
                   onRespondUserInput={respondUserInput}
                 />

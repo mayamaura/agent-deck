@@ -7,7 +7,7 @@ const noResponses = new Set<string>();
 describe("buildTree", () => {
   it("メインのみの正常完了", () => {
     const events: AppEvent[] = [
-      { kind: "taskStarted", sessionId: "s1", agentId: "survey-analyst", startedAt: "2026-08-12T00:00:00Z", prompt: "依頼" },
+      { kind: "taskStarted", sessionId: "s1", agentId: "survey-analyst", startedAt: "2026-08-12T00:00:00Z", prompt: "依頼", model: null },
       { kind: "agentIntent", sessionId: "s1", agentId: null, text: "集計しています" },
       { kind: "taskCompleted", sessionId: "s1", summary: "完了しました", outputFiles: ["report.md"] },
     ];
@@ -24,9 +24,19 @@ describe("buildTree", () => {
     expect(tree.subagents).toEqual([]);
   });
 
+  it("モデル表示: taskStarted の仮値を modelChanged(SDK 実測)が上書きする", () => {
+    const events: AppEvent[] = [
+      { kind: "taskStarted", sessionId: "s1", agentId: "writer", startedAt: "2026-08-12T00:00:00Z", prompt: "依頼", model: "gpt-5.6-luna" },
+    ];
+    expect(buildTree(events, noResponses).model).toBe("gpt-5.6-luna");
+
+    const withActualModel: AppEvent[] = [...events, { kind: "modelChanged", sessionId: "s1", model: "claude-sonnet-5" }];
+    expect(buildTree(withActualModel, noResponses).model).toBe("claude-sonnet-5");
+  });
+
   it("サブ開始→ツール→完了(duration・tokens 反映)", () => {
     const events: AppEvent[] = [
-      { kind: "taskStarted", sessionId: "s1", agentId: "coordinator", startedAt: "2026-08-12T00:00:00Z", prompt: "依頼" },
+      { kind: "taskStarted", sessionId: "s1", agentId: "coordinator", startedAt: "2026-08-12T00:00:00Z", prompt: "依頼", model: null },
       { kind: "subagentStarted", sessionId: "s1", agentId: "sub-1", toolCallId: "call-1", displayName: "data-cruncher" },
       { kind: "toolStarted", sessionId: "s1", agentId: "sub-1", toolCallId: "t-1", toolName: "read" },
       { kind: "toolCompleted", sessionId: "s1", agentId: "sub-1", toolCallId: "t-1", toolName: "read", success: true },
@@ -55,7 +65,7 @@ describe("buildTree", () => {
 
   it("サブ失敗", () => {
     const events: AppEvent[] = [
-      { kind: "taskStarted", sessionId: "s1", agentId: "coordinator", startedAt: "2026-08-12T00:00:00Z", prompt: "依頼" },
+      { kind: "taskStarted", sessionId: "s1", agentId: "coordinator", startedAt: "2026-08-12T00:00:00Z", prompt: "依頼", model: null },
       { kind: "subagentStarted", sessionId: "s1", agentId: "sub-1", toolCallId: "call-1", displayName: "helper" },
       { kind: "subagentFailed", sessionId: "s1", agentId: "sub-1", toolCallId: "call-1", error: "モデル呼び出しに失敗しました" },
       { kind: "taskFailed", sessionId: "s1", error: "サブエージェントの失敗により中断しました" },
@@ -74,7 +84,7 @@ describe("buildTree", () => {
 
   it("権限要求の行 attach と応答済み除外", () => {
     const events: AppEvent[] = [
-      { kind: "taskStarted", sessionId: "s1", agentId: "coordinator", startedAt: "2026-08-12T00:00:00Z", prompt: "依頼" },
+      { kind: "taskStarted", sessionId: "s1", agentId: "coordinator", startedAt: "2026-08-12T00:00:00Z", prompt: "依頼", model: null },
       { kind: "subagentStarted", sessionId: "s1", agentId: "sub-1", toolCallId: "call-1", displayName: "writer" },
       { kind: "toolStarted", sessionId: "s1", agentId: "sub-1", toolCallId: "t-1", toolName: "write" },
       {
@@ -100,7 +110,7 @@ describe("buildTree", () => {
 
   it("権限要求はメイン活動中ならメイン行に積まれる", () => {
     const events: AppEvent[] = [
-      { kind: "taskStarted", sessionId: "s1", agentId: "writer", startedAt: "2026-08-12T00:00:00Z", prompt: "依頼" },
+      { kind: "taskStarted", sessionId: "s1", agentId: "writer", startedAt: "2026-08-12T00:00:00Z", prompt: "依頼", model: null },
       { kind: "toolStarted", sessionId: "s1", agentId: null, toolCallId: "t-1", toolName: "write" },
       {
         kind: "permissionRequested",
@@ -117,7 +127,7 @@ describe("buildTree", () => {
 
   it("開始無しの toolCompleted は行を新規生成する", () => {
     const events: AppEvent[] = [
-      { kind: "taskStarted", sessionId: "s1", agentId: "writer", startedAt: "2026-08-12T00:00:00Z", prompt: "依頼" },
+      { kind: "taskStarted", sessionId: "s1", agentId: "writer", startedAt: "2026-08-12T00:00:00Z", prompt: "依頼", model: null },
       { kind: "toolCompleted", sessionId: "s1", agentId: null, toolCallId: "t-9", toolName: "write", success: false },
     ];
     const tree = buildTree(events, noResponses);
@@ -126,7 +136,7 @@ describe("buildTree", () => {
 
   it("cancelled: 実行中の行は中断状態に確定する", () => {
     const events: AppEvent[] = [
-      { kind: "taskStarted", sessionId: "s1", agentId: "coordinator", startedAt: "2026-08-12T00:00:00Z", prompt: "依頼" },
+      { kind: "taskStarted", sessionId: "s1", agentId: "coordinator", startedAt: "2026-08-12T00:00:00Z", prompt: "依頼", model: null },
       { kind: "subagentStarted", sessionId: "s1", agentId: "sub-1", toolCallId: "call-1", displayName: "helper" },
       { kind: "taskCancelled", sessionId: "s1" },
     ];
@@ -138,7 +148,7 @@ describe("buildTree", () => {
 
   it("usage の最新値反映", () => {
     const events: AppEvent[] = [
-      { kind: "taskStarted", sessionId: "s1", agentId: "coordinator", startedAt: "2026-08-12T00:00:00Z", prompt: "依頼" },
+      { kind: "taskStarted", sessionId: "s1", agentId: "coordinator", startedAt: "2026-08-12T00:00:00Z", prompt: "依頼", model: null },
       { kind: "usageUpdated", sessionId: "s1", currentTokens: 100, tokenLimit: null },
       { kind: "usageUpdated", sessionId: "s1", currentTokens: 4200, tokenLimit: 128000 },
     ];
@@ -154,9 +164,9 @@ describe("buildTree", () => {
 
   it("継続依頼(同一セッションで2回目の taskStarted)は過去ターンとして退避される", () => {
     const events: AppEvent[] = [
-      { kind: "taskStarted", sessionId: "s1", agentId: "writer", startedAt: "2026-08-12T00:00:00Z", prompt: "最初の依頼" },
+      { kind: "taskStarted", sessionId: "s1", agentId: "writer", startedAt: "2026-08-12T00:00:00Z", prompt: "最初の依頼", model: null },
       { kind: "taskCompleted", sessionId: "s1", summary: "1回目の結果", outputFiles: ["a.md"] },
-      { kind: "taskStarted", sessionId: "s1", agentId: "writer", startedAt: "2026-08-12T00:05:00Z", prompt: "続きの依頼" },
+      { kind: "taskStarted", sessionId: "s1", agentId: "writer", startedAt: "2026-08-12T00:05:00Z", prompt: "続きの依頼", model: null },
       { kind: "taskCompleted", sessionId: "s1", summary: "2回目の結果", outputFiles: [] },
     ];
     const tree = buildTree(events, noResponses);
@@ -171,9 +181,9 @@ describe("buildTree", () => {
 
   it("失敗したターンの退避は taskError を summary として残す", () => {
     const events: AppEvent[] = [
-      { kind: "taskStarted", sessionId: "s1", agentId: "writer", startedAt: "2026-08-12T00:00:00Z", prompt: "最初の依頼" },
+      { kind: "taskStarted", sessionId: "s1", agentId: "writer", startedAt: "2026-08-12T00:00:00Z", prompt: "最初の依頼", model: null },
       { kind: "taskFailed", sessionId: "s1", error: "途中で失敗" },
-      { kind: "taskStarted", sessionId: "s1", agentId: "writer", startedAt: "2026-08-12T00:05:00Z", prompt: "リトライして" },
+      { kind: "taskStarted", sessionId: "s1", agentId: "writer", startedAt: "2026-08-12T00:05:00Z", prompt: "リトライして", model: null },
     ];
     const tree = buildTree(events, noResponses);
 

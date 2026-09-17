@@ -62,6 +62,9 @@ export interface TreeState {
   prompt: string | null;
   /** 同一セッションで終わった過去の実行(古い順)。会話として現在の実行の上に表示する。 */
   turns: PastTurn[];
+  /** 現在の実行で使われているモデル(taskStarted の仮値を modelChanged が実測値で上書きする)。
+   * 未解決(SDK 既定に委ねた)なら null。 */
+  model: string | null;
 }
 
 function newRow(key: string, label: string, isMain: boolean): AgentRow {
@@ -137,6 +140,7 @@ export function buildTree(events: AppEvent[], respondedRequestIds: ReadonlySet<s
     startedAt: null,
     prompt: null,
     turns: [],
+    model: null,
   };
 
   // PermissionRequested には所有エージェントの相関 ID が無い(events.rs 参照。
@@ -175,6 +179,8 @@ export function buildTree(events: AppEvent[], respondedRequestIds: ReadonlySet<s
         state.startedAt = ev.startedAt;
         state.prompt = ev.prompt;
         state.taskStatus = "running";
+        // SDK の session.model_change(modelChanged)が届くまでの仮値。実測が来たら上書きされる。
+        state.model = ev.model;
         activeKey = "main";
         break;
       }
@@ -235,6 +241,10 @@ export function buildTree(events: AppEvent[], respondedRequestIds: ReadonlySet<s
             allowFreeform: ev.allowFreeform,
           });
         }
+        break;
+      }
+      case "modelChanged": {
+        state.model = ev.model;
         break;
       }
       case "usageUpdated": {

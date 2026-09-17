@@ -129,6 +129,12 @@ session.background_tasks_changed
   エージェントの model は `SessionConfig::with_model` 経由で渡すしかない**(agent-deck は
   main.rs でこの解決をしてから `TaskSpec.session_model` に詰めている)。選択されていない
   委任候補エージェントの個別モデル指定は現状のSDKでは反映する手段がない
+- **実際に使われているモデルを UI に出すなら `session.model_change` ではなく
+  `model.call_start`(`ModelCallStartData.model: Option<String>`)を見る**(2026-09-17 実機検証)。
+  `session.model_change` は CLI が直前のセッションと同じモデルを既定として記憶している場合に
+  発火しないことを確認した(2回目以降のセッションで一度も来ないケースがあった)。
+  `model.call_start` はターンごとの実際のモデル呼び出しで必ず発生するため、こちらを使う
+  (agent-deck の `copilot::EventContext::on_model_call_start` → `AppEvent::ModelChanged`)
 
 ### ツール制限
 

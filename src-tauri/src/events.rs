@@ -19,6 +19,17 @@ pub enum AppEvent {
         /// この実行の依頼文。継続依頼(resume)時に会話をターン単位で表示するために使う
         /// (フロントの tree.ts が taskStarted ごとにターンを区切る)。
         prompt: String,
+        /// 起動時点で解決済みのモデル(main.rs の resolved_model)。SDK 側の
+        /// session.model_change が届くまでの仮表示に使う。None は SDK 既定。
+        model: Option<String>,
+    },
+    /// SDK の session.model_change 由来。実際にセッションで使われているモデルが
+    /// 変わった(初回選択含む)通知。実機検証(docs/sdk-notes.md「カスタムエージェント」節)で
+    /// CustomAgentConfig.model が無視される事例を確認しているため、UI に「実際に使われている
+    /// モデル」を出すにはこのイベントが唯一の裏取り手段になる。
+    ModelChanged {
+        session_id: String,
+        model: String,
     },
     AgentIntent {
         session_id: String,
