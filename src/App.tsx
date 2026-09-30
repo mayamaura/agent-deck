@@ -97,6 +97,12 @@ function groupHistory(rows: HistoryEntry[]): { latest: HistoryEntry; runs: numbe
   return [...map.values()];
 }
 
+/** 保存は UTC(RFC3339)のまま、表示だけ日本時間にする。 */
+function formatJst(iso: string): string {
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? iso : d.toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
+}
+
 const TRIGGER_LABEL: Record<HistoryEntry["trigger"], string> = {
   manual: "🖐 手動",
   scheduled: "⏰ 定期",
@@ -1089,7 +1095,7 @@ export default function App() {
     setSessions((prev) => {
       if (prev[h.sessionId]) return prev; // 画面に残っているタブはそのまま使う
       const events = runs.flatMap((r) => {
-        const time = new Date(r.startedAt).toLocaleTimeString();
+        const time = new Date(r.startedAt).toLocaleTimeString("ja-JP", { timeZone: "Asia/Tokyo" });
         const started: AppEvent = {
           kind: "taskStarted",
           sessionId: r.sessionId,
@@ -1731,7 +1737,7 @@ export default function App() {
                 // セッション単位に1行へまとめる。
                 <tr key={h.sessionId} onContextMenu={(e) => openMenu(e, historyMenuItems(h))}>
                   <td>
-                    {h.startedAt}
+                    {formatJst(h.startedAt)}
                     {runs > 1 && <div className="muted">💬 {runs} 回のやり取り</div>}
                   </td>
                   <td>{h.agentId}</td>
