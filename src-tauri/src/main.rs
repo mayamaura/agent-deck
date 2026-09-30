@@ -489,7 +489,7 @@ fn default_workspace(data_dir: &Path, agent_id: &str) -> PathBuf {
 }
 
 /// Windows 専用アプリなので explorer を直接呼ぶ(プラグイン不要)。
-/// フォルダをエクスプローラで開く、または URL を既定ブラウザで開く用途のみに使う。
+/// フォルダをエクスプローラで開く用途のみに使う(URL は open_file_with_default_app)。
 /// ファイルパスを渡してもダブルクリック相当にはならず、親フォルダが開くだけ
 /// (explorer.exe の既知の挙動)なので、ファイルを開くには open_file_with_default_app を使う。
 fn open_in_explorer(target: &Path) -> Result<(), String> {
@@ -610,8 +610,9 @@ fn open_work_folder(state: State<AppState>, agent_id: String) -> Result<(), Stri
 #[tauri::command]
 fn open_chat_link(state: State<AppState>, agent_id: String, target: String) -> Result<(), String> {
     if target.starts_with("http://") || target.starts_with("https://") {
-        // explorer に URL を渡すと既定ブラウザが開く(open_in_explorer と同じ Windows 専用の流儀)
-        return open_in_explorer(Path::new(&target));
+        // explorer に URL を渡すと、URL の形(? & や日本語など)によっては既定ブラウザでなく
+        // フォルダが開くことがあるため、ShellExecuteW("open") でブラウザに渡す
+        return open_file_with_default_app(Path::new(&target));
     }
     // 空パスは work.join("") = 作業フォルダに化けて「押すと作業フォルダが開く」になるため弾く
     // (フロントの sanitize で href が空になる経路がある。src/mdLinks.ts の chatUrlTransform 参照)
