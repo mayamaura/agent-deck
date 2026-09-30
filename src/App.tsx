@@ -1558,6 +1558,21 @@ export default function App() {
                   onContextMenu={(e) => openMenu(e, sessionMenuItems(sid))}
                 >
                   {summary.agentId} {STATUS_LABEL[summary.status]}
+                  {/* button の入れ子は不正なので span。実行中は中断が先(右クリックメニューと同じ規則) */}
+                  {summary.status !== "running" && (
+                    <span
+                      role="button"
+                      className="session-tab-close"
+                      title="タブを閉じる"
+                      aria-label="タブを閉じる"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        closeSession(sid);
+                      }}
+                    >
+                      ✕
+                    </span>
+                  )}
                 </button>
               );
             })}

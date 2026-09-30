@@ -827,6 +827,18 @@ tbody tr:hover {
   font-size: 12px;
 }
 
+.session-tab-close {
+  margin-left: 8px;
+  padding: 0 4px;
+  border-radius: 4px;
+  opacity: 0.6;
+}
+
+.session-tab-close:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.12);
+}
+
 .session-tab.active {
   background: rgba(77, 227, 255, 0.14);
   border-color: var(--line-strong);
