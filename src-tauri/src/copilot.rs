@@ -609,7 +609,14 @@ pub fn resolve_cli_path(configured: Option<&Path>) -> Result<PathBuf, String> {
 
 /// `where copilot` 相当の PATH 探索(Windows 専用アプリのため `where` 固定)。
 fn find_on_path() -> Option<PathBuf> {
-    let output = std::process::Command::new("where").arg("copilot").output().ok()?;
+    use std::os::windows::process::CommandExt;
+    // GUI アプリから呼ぶと where.exe のコンソールが一瞬出るため抑止する
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let output = std::process::Command::new("where")
+        .arg("copilot")
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
