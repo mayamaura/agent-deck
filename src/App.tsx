@@ -83,6 +83,20 @@ function formatRecurrence(r: Recurrence): string {
   }
 }
 
+/** list_history に渡す「全件」相当の上限(セッション復元・一覧のまとめ用)。 */
+const HISTORY_ALL = 100_000;
+
+/** 新しい順の履歴を sessionId ごとに1行へまとめる(先頭=最新の実行、runs=やり取りの回数)。 */
+function groupHistory(rows: HistoryEntry[]): { latest: HistoryEntry; runs: number }[] {
+  const map = new Map<string, { latest: HistoryEntry; runs: number }>();
+  for (const r of rows) {
+    const g = map.get(r.sessionId);
+    if (g) g.runs++;
+    else map.set(r.sessionId, { latest: r, runs: 1 });
+  }
+  return [...map.values()];
+}
+
 const TRIGGER_LABEL: Record<HistoryEntry["trigger"], string> = {
   manual: "🖐 手動",
   scheduled: "⏰ 定期",
@@ -536,7 +550,7 @@ export default function App() {
     reloadAgents();
     reloadSchedules();
     reloadQueueStatus();
-    invoke<HistoryEntry[]>("list_history", { limit: 20 })
+    invoke<HistoryEntry[]>("list_history", { limit: HISTORY_ALL })
       .then(setHistory)
       .catch((e) => setError(String(e)));
     invoke<AppConfigDto>("get_app_config")
@@ -640,7 +654,7 @@ export default function App() {
         reloadQueueStatus();
       } else if (ev.kind === "taskCompleted" || ev.kind === "taskFailed" || ev.kind === "taskCancelled") {
         // 履歴ペインをこのタスクの結果で更新する(docs/requirements.md 受け入れ条件10)。
-        invoke<HistoryEntry[]>("list_history", { limit: 20 })
+        invoke<HistoryEntry[]>("list_history", { limit: HISTORY_ALL })
           .then(setHistory)
           .catch((e) => setError(String(e)));
         reloadQueueStatus();
@@ -1059,41 +1073,56 @@ export default function App() {
   /** 実行履歴の1行を実行ビューのタブとして開く(会話のレジューム)。過去のイベントログは
    * 保存していないため、履歴行(依頼文・結果概要)から会話を復元する。続きの依頼は
    * 既存の返信欄 → reply_task(resume)がそのまま使える。 */
-  function openHistorySession(h: HistoryEntry) {
+  async function openHistorySession(h: HistoryEntry) {
+    // 継続依頼(resume)は同じ sessionId で履歴行が実行ごとに増えるため、同一セッションの
+    // 全行を集めて古い順に並べ、1つの会話として復元する。
+    let runs: HistoryEntry[];
+    try {
+      runs = (await invoke<HistoryEntry[]>("list_history", { limit: HISTORY_ALL }))
+        .filter((r) => r.sessionId === h.sessionId)
+        .reverse();
+    } catch (e) {
+      setHistoryError(String(e));
+      return;
+    }
+    if (runs.length === 0) runs = [h];
     setSessions((prev) => {
       if (prev[h.sessionId]) return prev; // 画面に残っているタブはそのまま使う
-      const time = new Date(h.startedAt).toLocaleTimeString();
-      const started: AppEvent = {
-        kind: "taskStarted",
-        sessionId: h.sessionId,
-        agentId: h.agentId,
-        startedAt: h.startedAt,
-        prompt: h.prompt,
-        model: null,
-      };
-      const terminal: AppEvent =
-        h.status === "completed"
-          ? {
-              kind: "taskCompleted",
-              sessionId: h.sessionId,
-              summary: h.summary || "(この実行の結果概要は記録されていません)",
-              outputFiles: h.outputFiles,
-            }
-          : h.status === "failed"
+      const events = runs.flatMap((r) => {
+        const time = new Date(r.startedAt).toLocaleTimeString();
+        const started: AppEvent = {
+          kind: "taskStarted",
+          sessionId: r.sessionId,
+          agentId: r.agentId,
+          startedAt: r.startedAt,
+          prompt: r.prompt,
+          model: null,
+        };
+        const terminal: AppEvent =
+          r.status === "completed"
             ? {
-                kind: "taskFailed",
-                sessionId: h.sessionId,
-                error: h.summary || "(エラー内容は記録されていません)",
+                kind: "taskCompleted",
+                sessionId: r.sessionId,
+                summary: r.summary || "(この実行の結果概要は記録されていません)",
+                outputFiles: r.outputFiles,
               }
-            : { kind: "taskCancelled", sessionId: h.sessionId };
+            : r.status === "failed"
+              ? {
+                  kind: "taskFailed",
+                  sessionId: r.sessionId,
+                  error: r.summary || "(エラー内容は記録されていません)",
+                }
+              : { kind: "taskCancelled", sessionId: r.sessionId };
+        return [
+          { time, event: started },
+          { time, event: terminal },
+        ];
+      });
       return {
         ...prev,
         [h.sessionId]: {
           agentId: h.agentId,
-          events: [
-            { time, event: started },
-            { time, event: terminal },
-          ],
+          events,
           rowStartedAt: {},
           respondedRequestIds: new Set(),
         },
@@ -1697,14 +1726,14 @@ export default function App() {
               </tr>
             </thead>
             <tbody>
-              {history.map((h) => (
+              {groupHistory(history).slice(0, 20).map(({ latest: h, runs }) => (
                 // 継続依頼(resume)では同じ sessionId の履歴行が実行ごとに増えるため、
-                // startedAt と組み合わせて一意にする。
-                <tr
-                  key={`${h.sessionId}:${h.startedAt}`}
-                  onContextMenu={(e) => openMenu(e, historyMenuItems(h))}
-                >
-                  <td>{h.startedAt}</td>
+                // セッション単位に1行へまとめる。
+                <tr key={h.sessionId} onContextMenu={(e) => openMenu(e, historyMenuItems(h))}>
+                  <td>
+                    {h.startedAt}
+                    {runs > 1 && <div className="muted">💬 {runs} 回のやり取り</div>}
+                  </td>
                   <td>{h.agentId}</td>
                   <td>{TRIGGER_LABEL[h.trigger]}</td>
                   <td>
