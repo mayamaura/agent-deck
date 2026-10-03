@@ -933,6 +933,16 @@ export default function App() {
     }
   }
 
+  /** 入力フォルダを開く。既定が無いので未設定はエラー(理由は onError に出る)。 */
+  async function handleOpenInputFolder(agentId: string, onError: (message: string | null) => void) {
+    onError(null);
+    try {
+      await invoke("open_input_folder", { agentId });
+    } catch (e) {
+      onError(String(e));
+    }
+  }
+
   /** 作業フォルダを開く(中間ファイル・生成スクリプトの確認用)。
    * 未設定でも既定の場所(data/workspace/<agentId>)が開くのでエラーにはならない。 */
   async function handleOpenWorkFolder(agentId: string, onError: (message: string | null) => void) {
@@ -992,6 +1002,7 @@ export default function App() {
       { label: "▶ 実行対象に選択", onClick: () => setSelected(a.id) },
       { label: "⚙ 設定を開く", onClick: () => openAgentEditor(a.id, setError) },
       { label: "📂 出力フォルダを開く", onClick: () => handleOpenOutputFolder(a.id, setError) },
+      { label: "📥 入力フォルダを開く", onClick: () => handleOpenInputFolder(a.id, setError) },
       { label: "🛠 作業フォルダを開く", onClick: () => handleOpenWorkFolder(a.id, setError) },
       {
         label: "⏰ スケジュールを追加",
@@ -1745,19 +1756,28 @@ export default function App() {
             </ul>
           </div>
         )}
-        {selected && (
+        <div>
+          <p className="muted">フォルダを開く</p>
           <div className="run-controls">
-            <button type="button" onClick={() => handleOpenOutputFolder(selected, setOutputFolderError)}>
-              出力フォルダを開く
+            {selected && (
+              <>
+                <button type="button" onClick={() => handleOpenInputFolder(selected, setOutputFolderError)}>
+                  入力
+                </button>
+                <button type="button" onClick={() => handleOpenOutputFolder(selected, setOutputFolderError)}>
+                  出力
+                </button>
+                <button type="button" onClick={() => handleOpenWorkFolder(selected, setOutputFolderError)}>
+                  作業
+                </button>
+              </>
+            )}
+            <button type="button" onClick={handleOpenLogsFolder}>
+              監査ログ
             </button>
           </div>
-        )}
-        {outputFolderError && <p className="error">⚠ {outputFolderError}</p>}
-        <div className="run-controls">
-          <button type="button" onClick={handleOpenLogsFolder}>
-            監査ログフォルダを開く
-          </button>
         </div>
+        {outputFolderError && <p className="error">⚠ {outputFolderError}</p>}
         {logsFolderError && <p className="error">⚠ {logsFolderError}</p>}
         <h3>ログ({activeSession ? sessionSummary(activeSession.events.map((e) => e.event)).agentId : "—"})</h3>
         <ul className="event-log">

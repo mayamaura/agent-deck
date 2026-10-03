@@ -607,6 +607,21 @@ fn open_output_folder(state: State<AppState>, agent_id: String) -> Result<(), St
     open_agent_dir(state, &agent_id, |a| a.output_dir.clone())
 }
 
+/// 入力フォルダには既定が無い(start_task も既定を入れない)ので、未設定はエラーで理由を返す。
+#[tauri::command]
+fn open_input_folder(state: State<AppState>, agent_id: String) -> Result<(), String> {
+    let data_dir = state.data_dir()?;
+    let dir = config::load_agents_config(data_dir)?
+        .agents
+        .get(&agent_id)
+        .and_then(|a| a.input_dir.clone())
+        .ok_or_else(|| "入力フォルダが未設定です(エージェント設定で指定してください)".to_string())?;
+    if !dir.is_dir() {
+        return Err(format!("入力フォルダが見つかりません: {}", dir.display()));
+    }
+    open_in_explorer(&dir)
+}
+
 #[tauri::command]
 fn open_work_folder(state: State<AppState>, agent_id: String) -> Result<(), String> {
     open_agent_dir(state, &agent_id, |a| a.work_dir.clone())
@@ -1185,6 +1200,7 @@ fn main() {
             open_update_folder,
             list_history,
             open_output_folder,
+            open_input_folder,
             open_work_folder,
             open_chat_link,
             open_logs_folder,
