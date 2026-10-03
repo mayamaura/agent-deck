@@ -819,7 +819,11 @@ fn spawn_task_inner(
     if rules.output_dir.is_none() {
         std::fs::create_dir_all(&default_dir)
             .map_err(|e| format!("出力フォルダを作成できません({}): {e}", default_dir.display()))?;
-        rules.output_dir = Some(default_dir);
+        rules.output_dir = Some(default_dir.clone());
+    }
+    // 入力フォルダも未設定なら同じ既定に落とす(出力・作業フォルダと同じ扱い)。
+    if rules.input_dir.is_none() {
+        rules.input_dir = Some(default_dir);
     }
     // 実行中タスクと同じ outputDir なら起動を拒否する(docs/roadmap.md v0.5: 成果物の混線防止)。
     let output_dir = rules.output_dir.clone();

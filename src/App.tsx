@@ -1258,9 +1258,9 @@ export default function App() {
         <ul>
           {agents.map((a) => {
             const c = configs[a.id];
-            // 出力フォルダは未設定でも既定(data/workspace/<agentId>)に落ちるので、
-            // 実行前に決めておく必要があるのは読み取り元の入力フォルダだけ。
-            const unset = !c || !c.inputDir;
+            // 入出力・作業フォルダは未設定でも既定(data/workspace/<agentId>)に落ちるので、
+            // 実行前に決めておく必要はない。
+            const unset = !c;
             return (
               <li key={`${a.id}:${a.scope}`}>
                 <button
