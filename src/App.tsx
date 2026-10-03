@@ -115,7 +115,7 @@ function summarize(ev: AppEvent): string {
     case "taskStarted":
       return `タスク開始(session: ${ev.sessionId})`;
     case "agentIntent":
-      return `意図: ${ev.text}`;
+      return "意図"; // 本文は会話と重複するためログには出さない(表示側で除外)
     case "subagentStarted":
       return `サブエージェント開始: ${ev.displayName}`;
     case "subagentCompleted":
@@ -133,7 +133,7 @@ function summarize(ev: AppEvent): string {
     case "usageUpdated":
       return `トークン使用量: ${ev.currentTokens}${ev.tokenLimit != null ? ` / ${ev.tokenLimit}` : ""}`;
     case "taskCompleted":
-      return `タスク完了: ${ev.summary}`;
+      return "タスク完了";
     case "taskFailed":
       return `タスク失敗: ${ev.error}`;
     case "taskCancelled":
@@ -141,7 +141,7 @@ function summarize(ev: AppEvent): string {
     case "allowRuleAdded":
       return `常に許可を登録しました: ${ev.pattern}`;
     case "userInputRequested":
-      return `質問: ${ev.question}`;
+      return "質問(ユーザー入力待ち)";
     case "modelChanged":
       return `使用モデル: ${ev.model}`;
   }
@@ -1781,7 +1781,7 @@ export default function App() {
         {logsFolderError && <p className="error">⚠ {logsFolderError}</p>}
         <h3>ログ({activeSession ? sessionSummary(activeSession.events.map((e) => e.event)).agentId : "—"})</h3>
         <ul className="event-log">
-          {(activeSession?.events ?? []).map((e, i) => (
+          {(activeSession?.events ?? []).filter((e) => e.event.kind !== "agentIntent").map((e, i) => (
             <li key={i} className={e.event.kind === "taskFailed" ? "error" : undefined}>
               <span className="muted">{e.time}</span> [{e.event.kind}] {summarize(e.event)}
             </li>
