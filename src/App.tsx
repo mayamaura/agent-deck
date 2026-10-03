@@ -757,6 +757,9 @@ export default function App() {
   const runningSessionIds = Object.keys(sessions).filter(
     (sid) => sessionSummary(sessions[sid].events.map((e) => e.event)).status === "running",
   );
+  // フォルダを開く対象: 一覧で選択中のエージェント、なければ表示中セッション(履歴から開いた会話を含む)のエージェント。
+  // どちらも無い(起動直後)ときはボタンを出さない。
+  const folderTarget = selected ?? (activeSession?.agentId || null);
   const latestFailure = history.find((h) => h.status === "failed") ?? null;
 
   /** タスクを起動する(実行ボタンとスケジュール行の「今すぐ実行」で共用)。
@@ -1780,15 +1783,15 @@ export default function App() {
         <div>
           <p className="muted">フォルダを開く</p>
           <div className="run-controls">
-            {selected && (
+            {folderTarget && (
               <>
-                <button type="button" onClick={() => handleOpenInputFolder(selected, setOutputFolderError)}>
+                <button type="button" onClick={() => handleOpenInputFolder(folderTarget, setOutputFolderError)}>
                   入力
                 </button>
-                <button type="button" onClick={() => handleOpenOutputFolder(selected, setOutputFolderError)}>
+                <button type="button" onClick={() => handleOpenOutputFolder(folderTarget, setOutputFolderError)}>
                   出力
                 </button>
-                <button type="button" onClick={() => handleOpenWorkFolder(selected, setOutputFolderError)}>
+                <button type="button" onClick={() => handleOpenWorkFolder(folderTarget, setOutputFolderError)}>
                   作業
                 </button>
               </>
