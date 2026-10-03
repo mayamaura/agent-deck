@@ -10,6 +10,7 @@ import type {
   AgentSummary,
   AppConfigDto,
   AppEvent,
+  CreditStatus,
   HistoryEntry,
   QueueStatusDto,
   Recurrence,
@@ -523,6 +524,25 @@ export default function App() {
 
   // 右クリックメニュー(docs/requirements.md §3.6)。全ペイン共通で1インスタンス。
   const { menu, openMenu } = useContextMenu();
+
+  // 右上のクレジット表示(保有・使用済み)。Copilot CLI を起動して取るので起動時と手動更新のみ。
+  const [credit, setCredit] = useState<CreditStatus | null>(null);
+  const [creditError, setCreditError] = useState<string | null>(null);
+  const [creditLoading, setCreditLoading] = useState(false);
+  async function reloadCredit() {
+    setCreditLoading(true);
+    try {
+      setCredit(await invoke<CreditStatus>("get_credit_status"));
+      setCreditError(null);
+    } catch (e) {
+      setCreditError(String(e));
+    } finally {
+      setCreditLoading(false);
+    }
+  }
+  useEffect(() => {
+    void reloadCredit();
+  }, []);
 
   async function reloadAgents() {
     try {
@@ -1466,7 +1486,28 @@ export default function App() {
         </div>
       </aside>
       <main className="pane run">
-        <h2>実行ビュー</h2>
+        <h2>
+          実行ビュー
+          <span
+            className={creditError ? "credit credit-error" : "credit"}
+            title={creditError ?? (credit?.resetDate ? `クレジットの更新日: ${credit.resetDate.slice(0, 10)}` : "クレジット")}
+            onContextMenu={(e) =>
+              openMenu(e, [
+                { label: "🔄 クレジットを更新", onClick: () => void reloadCredit() },
+              ])
+            }
+          >
+            {creditError
+              ? "クレジット取得失敗"
+              : credit
+                ? credit.unlimited
+                  ? `クレジット 使用 ${credit.used} / 無制限`
+                  : `クレジット 使用 ${credit.used} / 保有 ${credit.entitlement}`
+                : creditLoading
+                  ? "クレジット取得中…"
+                  : ""}
+          </span>
+        </h2>
         {/* ダッシュボード帯(docs/roadmap.md v0.5): 実行中セッションのチップ・待機キュー・直近の失敗。 */}
         <div className="dashboard-bar">
           <div className="dashboard-chips">

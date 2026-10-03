@@ -117,6 +117,20 @@ body::before {
   box-shadow: 0 0 10px var(--accent);
 }
 
+/* 実行ビュー見出し右端のクレジット表示。見出しの行に相乗りさせ、縦の場所を取らない。 */
+.credit {
+  margin-left: auto;
+  font-size: 13px;
+  font-weight: 400;
+  letter-spacing: normal;
+  color: var(--text-dim);
+  cursor: default;
+}
+
+.credit-error {
+  color: var(--err);
+}
+
 /* エージェント設定ウインドウ(AgentEditor.tsx)。3 ペインの layout は使わない。 */
 .editor-window {
   min-height: 100vh;

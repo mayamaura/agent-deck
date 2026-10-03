@@ -8,5 +8,8 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
+    // Rust のビルド成果物(src-tauri/target)を監視しない。cargo がリンク中の
+    // agent_deck.exe を vite が watch して EBUSY で落ちるため(Tauri 標準テンプレートと同じ)。
+    watch: { ignored: ["**/src-tauri/**"] },
   },
 });
