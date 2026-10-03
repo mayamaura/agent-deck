@@ -1521,6 +1521,8 @@ export default function App() {
         </div>
       </aside>
       <main className="pane run">
+        {/* 見出し〜セッションタブはチャットをスクロールしても常に見えるよう固定する。 */}
+        <div className="run-sticky">
         <h2>
           実行ビュー
           <span
@@ -1654,6 +1656,7 @@ export default function App() {
             })}
           </div>
         )}
+        </div>
         {activeSession ? (
           <div className="chat">
             {/* 継続セッションの会話表示(会話のレジューム): 過去のターン(依頼→結果)を
