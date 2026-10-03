@@ -53,6 +53,16 @@ export interface ModelCatalog {
   models: ModelOption[];
 }
 
+// src-tauri/src/copilot.rs CreditStatus(get_credit_status の戻り値)
+export interface CreditStatus {
+  // 今期の保有数。無制限なら null。
+  entitlement: number | null;
+  used: number;
+  unlimited: boolean;
+  // 枠が切り替わる日(ISO 8601)
+  resetDate: string | null;
+}
+
 // src-tauri/src/sync.rs SyncSummary(sync_shared_agents_cmd の戻り値)
 export interface SyncSummary {
   added: number;

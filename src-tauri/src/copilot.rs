@@ -1409,6 +1409,44 @@ async fn current_plan(client: &Client) -> Option<String> {
     Some(auth.auth_info?.get("copilotUser")?.get("copilot_plan")?.as_str()?.to_string())
 }
 
+// ===== クレジット(プレミアムリクエスト)の保有・使用状況 =====
+
+/// ウインドウ右上に出す利用枠。SDK の `AccountQuotaSnapshot` から表示に要る分だけ落とす。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreditStatus {
+    /// 今期の保有数(entitlement)。無制限なら None。
+    pub entitlement: Option<i64>,
+    /// 今期の使用済み数。
+    pub used: i64,
+    pub unlimited: bool,
+    /// 枠が切り替わる日(ISO 8601)。
+    pub reset_date: Option<String>,
+}
+
+/// `premium_interactions` の利用枠を Copilot に問い合わせる。
+/// モデル一覧と同じく、取得のたびに Client を起動して止める(キャッシュを避ける)。
+pub async fn get_credit_status(cli_path: PathBuf) -> Result<CreditStatus, String> {
+    let client = Client::start(ClientOptions::new().with_program(CliProgram::Path(cli_path)))
+        .await
+        .map_err(|e| with_hint(&format!("Copilot CLI を起動できません: {e}")))?;
+    let quota = client.rpc().account().get_quota().await;
+    if let Err(e) = client.stop().await {
+        eprintln!("Client の停止に失敗しました: {e}");
+    }
+    let quota = quota.map_err(|e| with_hint(&format!("クレジット残枠を取得できません: {e}")))?;
+    let snap = quota
+        .quota_snapshots
+        .get("premium_interactions")
+        .ok_or("クレジット情報(premium_interactions)が返されませんでした")?;
+    Ok(CreditStatus {
+        entitlement: (!snap.is_unlimited_entitlement).then_some(snap.entitlement_requests),
+        used: snap.used_requests,
+        unlimited: snap.is_unlimited_entitlement,
+        reset_date: snap.reset_date.clone(),
+    })
+}
+
 // ===== エージェント定義の下書き生成(docs/roadmap.md v1.1 (b)) =====
 
 /// 定義エディタに流し込む下書き。**model は生成させない**: モデル名は SDK/CLI 側の語彙で

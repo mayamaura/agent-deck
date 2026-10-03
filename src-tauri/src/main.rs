@@ -291,6 +291,18 @@ async fn list_models(app: tauri::AppHandle) -> Result<copilot::ModelCatalog, Str
     copilot::list_models(cli_path).await
 }
 
+/// ウインドウ右上のクレジット表示(保有・使用済み)。
+#[tauri::command]
+async fn get_credit_status(app: tauri::AppHandle) -> Result<copilot::CreditStatus, String> {
+    let cli_path = {
+        let state = app.state::<AppState>();
+        let data_dir = state.data_dir()?.clone();
+        let cfg = config::load_app_config(&data_dir)?;
+        copilot::resolve_cli_path(cfg.copilot_cli_path.as_deref())?
+    };
+    copilot::get_credit_status(cli_path).await
+}
+
 #[tauri::command]
 fn duplicate_agent(state: State<AppState>, agent_id: String) -> Result<(), String> {
     let data_dir = state.data_dir()?;
@@ -1161,6 +1173,7 @@ fn main() {
             create_agent_definition,
             draft_agent_definition,
             list_models,
+            get_credit_status,
             duplicate_agent,
             rename_agent_definition,
             delete_agent_definition,

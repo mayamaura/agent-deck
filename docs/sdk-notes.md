@@ -219,7 +219,7 @@ session.background_tasks_changed
 - 契約プラン名は `client.rpc().account().get_current_auth()` の
   `auth_info.copilotUser.copilot_plan`(`individual` / `business` / `enterprise` 等)。
   `auth_info` は SDK 側も `serde_json::Value` のままなので生 JSON から読む
-- `account().get_quota()` でプレミアムリクエストの残枠も取れる(現時点では未使用)
+- `account().get_quota()` でプレミアムリクエストの残枠が取れる。`quota_snapshots["premium_interactions"]` の `entitlement_requests`(-1 は無制限)/ `used_requests` / `reset_date` を実行ビュー右上に表示(`get_credit_status`)
 - **`auth_info` には GitHub のアクセストークンが平文で入る**(`token`)。丸ごとログや
   エラー文に出さないこと(取り出すのはプラン名だけにする)
 
