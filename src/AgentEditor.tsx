@@ -532,6 +532,7 @@ export default function AgentEditor({ agentId }: { agentId: string }) {
               type="text"
               value={form.inputDir}
               onChange={(e) => setForm((f) => ({ ...f, inputDir: e.target.value }))}
+              placeholder="未設定なら data/workspace/<エージェントID>"
             />
             <button type="button" onClick={() => handlePickFolder("inputDir")}>
               選択...
