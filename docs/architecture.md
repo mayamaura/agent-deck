@@ -84,6 +84,7 @@ crates.io には Copilot CLI を制御する非公式クレートが複数存在
 | `respond_permission` | `request_id`, `decision` | `()` | 承認ダイアログの応答 |
 | `list_history` | `limit` | `Vec<HistoryEntry>` | 実行履歴の取得 |
 | `open_output_folder` | `agent_id` | `()` | 出力先をエクスプローラで開く(`explorer` 直接起動、プラグイン不要) |
+| `open_input_folder` | `agent_id` | `()` | 入力フォルダを開く。既定が無いため未設定・不在はエラー |
 | `get_agent_definition` | `agent_id` | `AgentDefinitionDto` | 定義エディタ用の全文取得(v0.2) |
 | `save_agent_definition` | `agent_id`, 各フィールド | `()` | 個人スコープ定義の保存(共有はエラー) |
 | `create_agent_definition` | `agent_id`, 各フィールド | `()` | 個人スコープに新規作成 |
