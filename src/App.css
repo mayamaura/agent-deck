@@ -824,6 +824,23 @@ tbody tr:hover {
   color: var(--err);
 }
 
+/* .pane の上余白(10px)ぶん食い込ませ、スクロールした内容が上端の隙間に透けないようにする。 */
+.run-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  margin: -10px -12px 0;
+  padding: 10px 12px 0px;
+  /* 子の下マージンを内側に閉じ込め、背景がその分まで覆うようにする(後続の内容が帯の下端に透けない)。 */
+  display: flow-root;
+  background: var(--bg);
+}
+
+/* 固定部分の直後(会話表示 / 「セッションはまだありません」)の上に余白を取る。 */
+.run-sticky + * {
+  margin-top: 20px;
+}
+
 .session-tabs {
   display: flex;
   flex-wrap: wrap;
