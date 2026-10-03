@@ -159,6 +159,9 @@ interface SessionState {
   events: LoggedEvent[];
   rowStartedAt: Record<string, number>;
   respondedRequestIds: Set<string>;
+  /** タスク前後のクレジット取得結果(ログ欄に差分を出す)。アカウント全体の累計なので
+   * 並行実行中は他タスクの消費も含む。 */
+  credit?: { before?: CreditStatus; after?: CreditStatus; error?: string };
 }
 
 function sessionElapsedMs(rowStartedAt: Record<string, number>, nowTick: number): number | null {
@@ -525,6 +528,22 @@ export default function App() {
   // 右クリックメニュー(docs/requirements.md §3.6)。全ペイン共通で1インスタンス。
   const { menu, openMenu } = useContextMenu();
 
+  /** セッションのクレジット取得結果を更新する(取得は非同期なのでセッションが消えていたら捨てる)。 */
+  function fetchSessionCredit(sid: string, slot: "before" | "after") {
+    invoke<CreditStatus>("get_credit_status")
+      .then((status) => {
+        if (slot === "after") setCredit(status); // 右上の表示も最新にする
+        setSessions((prev) =>
+          prev[sid] ? { ...prev, [sid]: { ...prev[sid], credit: { ...prev[sid].credit, [slot]: status } } } : prev,
+        );
+      })
+      .catch((e) =>
+        setSessions((prev) =>
+          prev[sid] ? { ...prev, [sid]: { ...prev[sid], credit: { ...prev[sid].credit, error: String(e) } } } : prev,
+        ),
+      );
+  }
+
   // 右上のクレジット表示(保有・使用済み)。Copilot CLI を起動して取るので起動時と手動更新のみ。
   const [credit, setCredit] = useState<CreditStatus | null>(null);
   const [creditError, setCreditError] = useState<string | null>(null);
@@ -678,6 +697,7 @@ export default function App() {
         setPendingReplies((prev) => removeKey(prev, sid));
         // スケジュール実行がキューから1件消費されたはずなので待機件数を更新する。
         reloadQueueStatus();
+        fetchSessionCredit(sid, "before");
       } else if (ev.kind === "taskCompleted" || ev.kind === "taskFailed" || ev.kind === "taskCancelled") {
         // 履歴ペインをこのタスクの結果で更新する(docs/requirements.md 受け入れ条件10)。
         invoke<HistoryEntry[]>("list_history", { limit: HISTORY_ALL })
@@ -685,6 +705,7 @@ export default function App() {
           .catch((e) => setError(String(e)));
         reloadQueueStatus();
         reloadSchedules();
+        fetchSessionCredit(sid, "after");
         setSessions((prev) => pruneOldFinishedSessions(prev));
       }
     });
@@ -1780,6 +1801,15 @@ export default function App() {
         {outputFolderError && <p className="error">⚠ {outputFolderError}</p>}
         {logsFolderError && <p className="error">⚠ {logsFolderError}</p>}
         <h3>ログ({activeSession ? sessionSummary(activeSession.events.map((e) => e.event)).agentId : "—"})</h3>
+        {activeSession?.credit && (
+          <p className={activeSession.credit.error ? "error" : "muted"}>
+            {activeSession.credit.error
+              ? `クレジット取得失敗: ${activeSession.credit.error}`
+              : activeSession.credit.before && activeSession.credit.after
+                ? `クレジット使用: +${activeSession.credit.after.used - activeSession.credit.before.used}(累計 ${activeSession.credit.after.used} / ${activeSession.credit.after.unlimited ? "無制限" : activeSession.credit.after.entitlement})`
+                : "クレジット使用: 集計中…"}
+          </p>
+        )}
         <ul className="event-log">
           {(activeSession?.events ?? []).filter((e) => e.event.kind !== "agentIntent").map((e, i) => (
             <li key={i} className={e.event.kind === "taskFailed" ? "error" : undefined}>
