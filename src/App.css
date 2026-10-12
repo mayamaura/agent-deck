@@ -827,7 +827,8 @@ tbody tr:hover {
 /* .pane の上余白(10px)ぶん食い込ませ、スクロールした内容が上端の隙間に透けないようにする。 */
 .run-sticky {
   position: sticky;
-  top: 0;
+  /* sticky の基準位置は .pane の padding の内側なので、上余白ぶん(-10px)上へ張り付かせて隙間を無くす。 */
+  top: -10px;
   z-index: 5;
   margin: -10px -12px 0;
   padding: 10px 12px 0px;
