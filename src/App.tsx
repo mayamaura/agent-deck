@@ -84,6 +84,22 @@ function formatRecurrence(r: Recurrence): string {
   }
 }
 
+/** ペイン境界の初期サイズ(px)。l=エージェント幅 / r=詳細幅 / h=実行履歴の高さ。 */
+const PANE_DEFAULT = { l: 260, r: 300, h: 200 };
+type PaneKey = keyof typeof PANE_DEFAULT;
+const PANE_MIN = 140;
+const PANE_STORAGE_KEY = "agent-deck.paneSizes";
+
+function loadPaneSizes(): typeof PANE_DEFAULT {
+  try {
+    const v = JSON.parse(localStorage.getItem(PANE_STORAGE_KEY) ?? "null");
+    if (v && [v.l, v.r, v.h].every((n) => Number.isFinite(n))) return { l: v.l, r: v.r, h: v.h };
+  } catch {
+    // 読めなければ既定値(保存は利便性のみ)
+  }
+  return PANE_DEFAULT;
+}
+
 /** list_history に渡す「全件」相当の上限(セッション復元・一覧のまとめ用)。 */
 const HISTORY_ALL = 100_000;
 
@@ -535,6 +551,45 @@ export default function App() {
 
   // 右クリックメニュー(docs/requirements.md §3.6)。全ペイン共通で1インスタンス。
   const { menu, openMenu } = useContextMenu();
+
+  // ペイン境界のドラッグ幅。WebView の localStorage に保存して次回起動でも維持する。
+  const [paneSizes, setPaneSizes] = useState(loadPaneSizes);
+  const layoutRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    try {
+      localStorage.setItem(PANE_STORAGE_KEY, JSON.stringify(paneSizes));
+    } catch {
+      // 保存できなくても動作には影響しない
+    }
+  }, [paneSizes]);
+  function startPaneDrag(key: PaneKey, e: React.PointerEvent<HTMLDivElement>) {
+    const layout = layoutRef.current;
+    if (!layout) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const move = (ev: PointerEvent) => {
+      const r = layout.getBoundingClientRect();
+      // layout の padding(10px)+ハンドル幅の半分(5px)を境界の中心とみなす。
+      const size =
+        key === "l" ? ev.clientX - r.left - 15 : key === "r" ? r.right - ev.clientX - 15 : r.bottom - ev.clientY - 15;
+      setPaneSizes((p) => ({ ...p, [key]: Math.max(PANE_MIN, Math.round(size)) }));
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+  /** 境界のダブルクリック/右クリックから呼ぶ「初期の広さに戻す」。 */
+  const resetPane = (key: PaneKey) => setPaneSizes((p) => ({ ...p, [key]: PANE_DEFAULT[key] }));
+  const resizer = (key: PaneKey, cls: string) => (
+    <div
+      className={`resizer ${cls}`}
+      onPointerDown={(e) => startPaneDrag(key, e)}
+      onDoubleClick={() => resetPane(key)}
+      onContextMenu={(e) => openMenu(e, [{ label: "↔ 初期の広さに戻す", onClick: () => resetPane(key) }])}
+    />
+  );
 
   /** セッションのクレジット取得結果を更新する(取得は非同期なのでセッションが消えていたら捨てる)。 */
   function fetchSessionCredit(sid: string, slot: "before" | "after") {
@@ -1256,7 +1311,17 @@ export default function App() {
           {openUpdateFolderError && <p className="error">⚠ {openUpdateFolderError}</p>}
         </div>
       )}
-      <div className="layout">
+      <div
+        className="layout"
+        ref={layoutRef}
+        style={
+          {
+            "--pane-l": `${paneSizes.l}px`,
+            "--pane-r": `${paneSizes.r}px`,
+            "--pane-h": `${paneSizes.h}px`,
+          } as React.CSSProperties
+        }
+      >
       <aside className="pane agents">
         <h2>エージェント</h2>
         {error && <p className="error">⚠ {error}</p>}
@@ -1535,6 +1600,7 @@ export default function App() {
           {scheduleError && <p className="error">⚠ {scheduleError}</p>}
         </div>
       </aside>
+      {resizer("l", "v rz-l")}
       <main className="pane run">
         {/* 見出し〜セッションタブはチャットをスクロールしても常に見えるよう固定する。 */}
         <div className="run-sticky">
@@ -1775,6 +1841,7 @@ export default function App() {
           <p className="muted">実行中・直近のセッションはまだありません</p>
         )}
       </main>
+      {resizer("r", "v rz-r")}
       <aside className="pane detail">
         <h2>詳細</h2>
         {tree.usage && (
@@ -1840,6 +1907,7 @@ export default function App() {
         </ul>
         <p className="muted app-version">agent-deck v{appConfig?.currentVersion ?? "?"}</p>
       </aside>
+      {resizer("h", "h rz-h")}
       <footer className="pane history">
         <h2>実行履歴</h2>
         {historyError && <p className="error">⚠ {historyError}</p>}

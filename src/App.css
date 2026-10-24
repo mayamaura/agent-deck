@@ -74,15 +74,24 @@ body::before {
 
 .layout {
   display: grid;
-  grid-template-columns: 260px 1fr 300px;
-  grid-template-rows: 1fr 200px;
+  /* 境界は 10px のハンドル用トラック(ドラッグで --pane-* を変える)。 */
+  grid-template-columns: var(--pane-l, 260px) 10px minmax(0, 1fr) 10px var(--pane-r, 300px);
+  grid-template-rows: minmax(0, 1fr) 10px var(--pane-h, 200px);
   grid-template-areas:
-    "agents run detail"
-    "agents history history";
+    "agents rz-l run rz-r detail"
+    "agents rz-l rz-h rz-h rz-h"
+    "agents rz-l history history history";
   height: 100vh;
-  gap: 10px;
   padding: 10px;
 }
+
+.resizer { border-radius: 4px; transition: background 0.15s; }
+.resizer:hover { background: var(--line); }
+.resizer.v { cursor: col-resize; }
+.resizer.h { cursor: row-resize; }
+.rz-l { grid-area: rz-l; }
+.rz-r { grid-area: rz-r; }
+.rz-h { grid-area: rz-h; }
 
 .pane {
   background: var(--panel);
