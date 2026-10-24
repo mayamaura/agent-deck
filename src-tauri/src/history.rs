@@ -28,6 +28,10 @@ pub struct HistoryEntry {
     /// 欠落時は "manual" 扱い(後方互換)。
     #[serde(default = "default_trigger")]
     pub trigger: String,
+    /// 会話の見出し(AI 生成)。新規セッションの最初の行にだけ入る。旧行・生成失敗時は空文字で、
+    /// UI は依頼文の1行目で代用する。
+    #[serde(default)]
+    pub title: String,
 }
 
 fn default_trigger() -> String {
@@ -67,6 +71,7 @@ pub fn entry_from_outcome(agent_id: &str, prompt: &str, outcome: &RunOutcome, tr
             .map(|s| SubagentRecord { name: s.name.clone(), duration_ms: s.duration_ms })
             .collect(),
         trigger: trigger.to_string(),
+        title: String::new(),
     }
 }
 

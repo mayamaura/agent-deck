@@ -115,6 +115,8 @@ export interface HistoryEntry {
   subagents: { name: string; durationMs: number }[];
   // "manual" / "scheduled"(docs/roadmap.md v0.4)。
   trigger: "manual" | "scheduled";
+  // 会話の見出し(AI 生成)。新規セッションの最初の行にだけ入り、旧行・生成失敗時は空文字。
+  title: string;
 }
 
 // src-tauri/src/schedule.rs Recurrence(weekday: 0=日〜6=土)

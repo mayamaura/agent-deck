@@ -830,6 +830,9 @@ fn spawn_task_inner(
 
     // 履歴書き込み用に、TaskSpec へ move する前に複製しておく(docs/development.md ステップ6)。
     let prompt_for_history = prompt.clone();
+    // 履歴の見出し生成用(cli_path / モデルは TaskSpec・run_task へ move されるため複製)。
+    let title_cli_path = cli_path.clone();
+    let title_model = resolved_model.clone();
     // TaskStarted 前の起動失敗を UI に通知する際のセッション ID(下の Err アーム参照)。
     // resume なら元セッションへ失敗ターンとして届き、新規なら run_id の擬似セッションになる。
     let session_id_for_err = resume_session_id.clone();
@@ -935,9 +938,34 @@ fn spawn_task_inner(
                 );
                 // タスク自体は(成功/失敗/中断のいずれでも)終わっているため、追記に失敗しても
                 // TaskFailed イベントは出さず eprintln に留める(UI にはもう出しようがない)。
-                let entry = history::entry_from_outcome(&agent_id, &prompt_for_history, &outcome, trigger);
+                let mut entry = history::entry_from_outcome(&agent_id, &prompt_for_history, &outcome, trigger);
+                // 新規セッションの最初の行にだけ AI の見出しを付ける(続きの依頼は最初の行の見出しを使う)。
+                // 見出しは飾りなので、失敗してもタスクの結果は変えず eprintln に留める
+                // (UI は依頼文の1行目で代用する)。
+                if session_id_for_err.is_none() {
+                    let workdir = data_dir.join("workspace");
+                    match std::fs::create_dir_all(&workdir)
+                        .map_err(|e| e.to_string())
+                        .and(
+                            copilot::generate_title(
+                                title_cli_path,
+                                title_model,
+                                workdir,
+                                &prompt_for_history,
+                                &outcome.summary,
+                            )
+                            .await,
+                        ) {
+                        Ok(t) => entry.title = t,
+                        Err(e) => eprintln!("履歴の見出しを生成できませんでした: {e}"),
+                    }
+                }
                 if let Err(e) = history::append(&data_dir, &entry) {
                     eprintln!("履歴の追記に失敗しました: {e}");
+                }
+                // 完了イベントでの再取得は追記より早いことがあるため、追記後に改めて知らせる。
+                if let Err(e) = app_handle.emit("history-changed", ()) {
+                    eprintln!("履歴更新の通知に失敗しました: {e}");
                 }
                 // 来歴(provenance)の記録(docs/roadmap.md v0.6)。history 追記と同様、タスク自体は
                 // 既に終わっているため、失敗しても eprintln に留める(TaskFailed化しない)。

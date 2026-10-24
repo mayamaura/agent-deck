@@ -1525,16 +1525,73 @@ pub async fn draft_agent(
     working_directory: PathBuf,
     request: String,
 ) -> Result<DraftedAgent, String> {
+    let text = one_shot(
+        cli_path,
+        session_model,
+        working_directory,
+        CustomAgentConfig::new(DRAFTER_AGENT_NAME.to_string(), DRAFTER_INSTRUCTIONS.to_string())
+            .with_description("agent-deck のエージェント定義の下書きを作る".to_string()),
+        request,
+        DRAFT_TIMEOUT,
+    )
+    .await
+    .map_err(|e| format!("下書きの生成に失敗しました: {e}"))?;
+    parse_drafted_agent(&text)
+}
+
+const TITLER_AGENT_NAME: &str = "agent-deck-titler";
+
+const TITLER_INSTRUCTIONS: &str = "あなたは会話に付ける短い見出しを作る担当です。利用者の依頼(と、あれば結果の要旨)から、何の会話だったか一目で分かる見出しを日本語で1つだけ返します。20文字以内。名詞句で言い切る(例: 「5月売上の部門別集計」)。前置き・引用符・句点・説明は一切書かない。";
+
+/// 実行履歴に出す会話の見出しを作る。ツールなしの 1 往復(draft_agent と同じ one_shot)。
+pub async fn generate_title(
+    cli_path: PathBuf,
+    session_model: Option<String>,
+    working_directory: PathBuf,
+    prompt: &str,
+    summary: &str,
+) -> Result<String, String> {
+    // 長文を丸ごと送らない(見出し用には冒頭で足りる)。
+    let clip = |s: &str| s.chars().take(600).collect::<String>();
+    let request = format!("## 依頼
+{}
+
+## 結果
+{}", clip(prompt), clip(summary));
+    let text = one_shot(
+        cli_path,
+        session_model,
+        working_directory,
+        CustomAgentConfig::new(TITLER_AGENT_NAME.to_string(), TITLER_INSTRUCTIONS.to_string())
+            .with_description("会話の見出しを作る".to_string()),
+        request,
+        Duration::from_secs(60),
+    )
+    .await?;
+    let title: String = text.trim().trim_matches(|c| "「」\"'".contains(c)).chars().take(30).collect();
+    if title.is_empty() {
+        return Err("見出しが空でした".to_string());
+    }
+    Ok(title)
+}
+
+/// ツールなし・1 往復のテキスト生成。`tools: []`(全禁止)で、ファイルにも外部にも触れない。
+async fn one_shot(
+    cli_path: PathBuf,
+    session_model: Option<String>,
+    working_directory: PathBuf,
+    agent: CustomAgentConfig,
+    request: String,
+    timeout: Duration,
+) -> Result<String, String> {
     let client = Client::start(ClientOptions::new().with_program(CliProgram::Path(cli_path)))
         .await
         .map_err(|e| with_hint(&format!("Copilot CLI を起動できません: {e}")))?;
 
-    let drafter = CustomAgentConfig::new(DRAFTER_AGENT_NAME.to_string(), DRAFTER_INSTRUCTIONS.to_string())
-        .with_description("agent-deck のエージェント定義の下書きを作る".to_string())
-        .with_tools(Vec::<String>::new());
+    let agent_name = agent.name.clone();
     let mut config = SessionConfig::default()
-        .with_custom_agents(vec![drafter])
-        .with_agent(DRAFTER_AGENT_NAME.to_string())
+        .with_custom_agents(vec![agent.with_tools(Vec::<String>::new())])
+        .with_agent(agent_name)
         .with_working_directory(working_directory);
     if let Some(model) = session_model {
         config = config.with_model(model);
@@ -1551,7 +1608,7 @@ pub async fn draft_agent(
     };
 
     let mut events = session.subscribe();
-    let send_fut = session.send_and_wait(MessageOptions::new(request).with_wait_timeout(DRAFT_TIMEOUT));
+    let send_fut = session.send_and_wait(MessageOptions::new(request).with_wait_timeout(timeout));
     tokio::pin!(send_fut);
     let mut last_message = String::new();
 
@@ -1578,9 +1635,8 @@ pub async fn draft_agent(
     if let Err(e) = client.stop().await {
         eprintln!("Client の停止に失敗しました: {e}");
     }
-    send_result.map_err(|e| with_hint(&format!("下書きの生成に失敗しました: {e}")))?;
-
-    parse_drafted_agent(&last_message)
+    send_result.map_err(|e| with_hint(&e.to_string()))?;
+    Ok(last_message)
 }
 
 /// メインエージェント(agent_id なし)の確定本文だけを拾う。EventContext と同じ理由で

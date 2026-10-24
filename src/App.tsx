@@ -88,14 +88,22 @@ function formatRecurrence(r: Recurrence): string {
 const HISTORY_ALL = 100_000;
 
 /** 新しい順の履歴を sessionId ごとに1行へまとめる(先頭=最新の実行、runs=やり取りの回数)。 */
-function groupHistory(rows: HistoryEntry[]): { latest: HistoryEntry; runs: number }[] {
-  const map = new Map<string, { latest: HistoryEntry; runs: number }>();
+function groupHistory(rows: HistoryEntry[]): { latest: HistoryEntry; runs: number; topic: string }[] {
+  const map = new Map<string, { latest: HistoryEntry; runs: number; topic: string }>();
   for (const r of rows) {
     const g = map.get(r.sessionId);
-    if (g) g.runs++;
-    else map.set(r.sessionId, { latest: r, runs: 1 });
+    if (g) {
+      g.runs++;
+      g.topic = r.title || r.prompt; // 新しい順なので、最後に見た行 = 会話の最初の行
+    } else map.set(r.sessionId, { latest: r, runs: 1, topic: r.title || r.prompt });
   }
   return [...map.values()];
+}
+
+/** 一覧用の概要: AI の見出し、無ければ最初の依頼文の1行目を短く切る(全文はツールチップ)。 */
+function topicLabel(prompt: string): string {
+  const line = prompt.trim().split(/\r?\n/)[0];
+  return line.length > 40 ? line.slice(0, 40) + "…" : line || "(依頼内容なし)";
 }
 
 /** 保存は UTC(RFC3339)のまま、表示だけ日本時間にする。 */
@@ -617,8 +625,15 @@ export default function App() {
   // 全イベントが二重処理される(プロンプト・承認カードの二重表示の原因)。
   useEffect(() => {
     const unlisten = listen(AGENTS_CHANGED, () => reloadAgents());
+    // 見出し生成を待ってから履歴を追記するため、完了イベントより遅れて届く。
+    const unlistenHistory = listen("history-changed", () => {
+      invoke<HistoryEntry[]>("list_history", { limit: HISTORY_ALL })
+        .then(setHistory)
+        .catch((e) => setError(String(e)));
+    });
     return () => {
       unlisten.then((fn) => fn());
+      unlistenHistory.then((fn) => fn());
     };
   }, []);
 
@@ -1836,6 +1851,7 @@ export default function App() {
               <tr>
                 <th>開始</th>
                 <th>エージェント</th>
+                <th>概要</th>
                 <th>種別</th>
                 <th>状態</th>
                 <th>所要</th>
@@ -1844,7 +1860,7 @@ export default function App() {
               </tr>
             </thead>
             <tbody>
-              {groupHistory(history).slice(0, 20).map(({ latest: h, runs }) => (
+              {groupHistory(history).slice(0, 20).map(({ latest: h, runs, topic }) => (
                 // 継続依頼(resume)では同じ sessionId の履歴行が実行ごとに増えるため、
                 // セッション単位に1行へまとめる。
                 <tr key={h.sessionId} onContextMenu={(e) => openMenu(e, historyMenuItems(h))}>
@@ -1853,6 +1869,7 @@ export default function App() {
                     {runs > 1 && <div className="muted">💬 {runs} 回のやり取り</div>}
                   </td>
                   <td>{h.agentId}</td>
+                  <td title={topic}>{topicLabel(topic)}</td>
                   <td>{TRIGGER_LABEL[h.trigger]}</td>
                   <td>
                     {h.status === "completed" ? "✅ 完了" : h.status === "failed" ? "❌ 失敗" : "⏹ 中断"}
