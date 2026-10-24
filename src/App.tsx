@@ -104,7 +104,7 @@ function loadPaneSizes(): typeof PANE_DEFAULT {
 const HISTORY_ALL = 100_000;
 
 /** 新しい順の履歴を sessionId ごとに1行へまとめる(先頭=最新の実行、runs=やり取りの回数)。 */
-function groupHistory(rows: HistoryEntry[]): { latest: HistoryEntry; runs: number; topic: string }[] {
+export function groupHistory(rows: HistoryEntry[]): { latest: HistoryEntry; runs: number; topic: string }[] {
   const map = new Map<string, { latest: HistoryEntry; runs: number; topic: string }>();
   for (const r of rows) {
     const g = map.get(r.sessionId);
@@ -123,7 +123,7 @@ function topicLabel(prompt: string): string {
 }
 
 /** 保存は UTC(RFC3339)のまま、表示だけ日本時間にする。 */
-function formatJst(iso: string): string {
+export function formatJst(iso: string): string {
   const d = new Date(iso);
   return isNaN(d.getTime()) ? iso : d.toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
 }
@@ -219,7 +219,7 @@ const TOOL_STATUS_LABEL: Record<"running" | "ok" | "failed", string> = {
   failed: "失敗",
 };
 
-function formatDuration(ms: number): string {
+export function formatDuration(ms: number): string {
   const totalSeconds = Math.max(0, Math.round(ms / 1000));
   const m = Math.floor(totalSeconds / 60);
   const s = totalSeconds % 60;
@@ -318,7 +318,7 @@ function UserInputRowView({
  * Rust の open_chat_link に渡す — URL は既定ブラウザ、相対パスは作業フォルダ基準で解決して開く。
  * agentId は相対パスの基準(作業フォルダ)を引くために必要。
  */
-function Md({ text, agentId }: { text: string; agentId: string }) {
+export function Md({ text, agentId }: { text: string; agentId: string }) {
   const [linkError, setLinkError] = useState<string | null>(null);
   return (
     <div className="md">
@@ -488,6 +488,23 @@ async function openAgentEditor(agentId: string, onError: (message: string) => vo
     height: 900,
   });
   w.once("tauri://error", (e) => onError(`設定ウインドウを開けませんでした: ${JSON.stringify(e.payload)}`));
+}
+
+/** エージェント 1 件のサマリ(会話・成果物の一覧)ウインドウを開く。AgentSummary.tsx。 */
+async function openAgentSummary(agentId: string, onError: (message: string) => void) {
+  const label = `agent-summary-${agentId.replace(/[^a-zA-Z0-9_-]/g, "_")}`; // 衝突の扱いは openAgentEditor と同じ
+  const existing = await WebviewWindow.getByLabel(label);
+  if (existing) {
+    await existing.setFocus();
+    return;
+  }
+  const w = new WebviewWindow(label, {
+    url: `index.html?summary=${encodeURIComponent(agentId)}`,
+    title: `サマリ — ${agentId}`,
+    width: 720,
+    height: 800,
+  });
+  w.once("tauri://error", (e) => onError(`サマリウインドウを開けませんでした: ${JSON.stringify(e.payload)}`));
 }
 
 export default function App() {
@@ -1095,6 +1112,7 @@ export default function App() {
     return [
       { label: "▶ 実行対象に選択", onClick: () => setSelected(a.id) },
       { label: "⚙ 設定を開く", onClick: () => openAgentEditor(a.id, setError) },
+      { label: "📊 サマリを開く", onClick: () => openAgentSummary(a.id, setError) },
       { label: "📂 出力フォルダを開く", onClick: () => handleOpenOutputFolder(a.id, setError) },
       { label: "📥 入力フォルダを開く", onClick: () => handleOpenInputFolder(a.id, setError) },
       { label: "🛠 作業フォルダを開く", onClick: () => handleOpenWorkFolder(a.id, setError) },
@@ -1374,6 +1392,9 @@ export default function App() {
           <div className="run-controls">
             <button type="button" onClick={() => openAgentEditor(selected, setError)}>
               ⚙ 設定を開く(別ウインドウ)
+            </button>
+            <button type="button" onClick={() => openAgentSummary(selected, setError)}>
+              📊 サマリを開く(別ウインドウ)
             </button>
           </div>
         )}
